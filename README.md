@@ -14,6 +14,10 @@ occurrences exist and where, then *Strip*. Matching glyphs are deleted from the
 content stream, so the text stops being selectable, searchable and copyable. It is
 removed, not painted over.
 
+**View a page.** Click any thumbnail to open it large. Arrow keys page through,
+`+` / `-` / `0` or Ctrl-scroll zoom from 50% to 600% (100% fits the pane), and drag
+to pan once the page is bigger than the window.
+
 **Page operations.** Reorder by dragging, rotate, delete, merge other PDFs in,
 and export a selection of pages as a new file.
 
@@ -59,7 +63,7 @@ blocked on `file://`.
 
     npm test
 
-43 assertions driving the real `worker.js` in Node against checked-in fixtures.
+47 assertions driving the real `worker.js` in Node against checked-in fixtures.
 No dependencies to install; it uses the libraries already in `vendor/`.
 
 Three of those groups exist because there is no browser in the loop:
@@ -72,6 +76,14 @@ Three of those groups exist because there is no browser in the loop:
 - **Every `$('id')` resolves.** A mistyped id would otherwise surface only as a
   null-dereference in front of a user.
 - **Every `call()` targets a real worker handler.**
+- **No positioned class doubles as a modifier.** A class setting
+  `position: absolute` is a layout primitive; combined with a component class on the
+  same element it silently pulls that component out of flow. `.ghost` was both the
+  editor's drag-placement box and the `.btn.ghost` button variant, which stacked
+  twelve buttons on top of one another with a dashed accent border. It is now
+  `.movebox`, and the test fails if any positioned class is ever combined again.
+- **Every class used in the HTML is defined in the CSS**, which catches typos and
+  leftovers.
 
 ## Deploy to Vercel
 
@@ -120,9 +132,8 @@ are not. Normalising up front removes that trap and repairs minor damage.
 - **A phrase split across two lines may not match.** Add a shorter fragment such
   as `hispanoteca.ru` on its own line.
 - **The UI is marked `translate="no"`.** The page shows Russian and Spanish text, so
-  a browser translator decides the whole page is foreign and rewrites the interface
-  labels, injecting duplicate text nodes that visibly overlap the originals. If you
-  still see doubled-up button text, a translator extension is overriding this.
+  a browser translator could decide the whole page is foreign and rewrite the
+  interface labels. This is precautionary hardening, not a fix for anything observed.
 - **Reordering and deleting rebuild the document,** which drops bookmarks and
   document metadata. Rotation alone is applied in place and keeps them.
 

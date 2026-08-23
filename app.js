@@ -460,6 +460,9 @@ document.addEventListener('keydown', (e) => {
   if ($('viewer').hidden) return
   if (e.key === 'ArrowLeft') { e.preventDefault(); vwStep(-1) }
   if (e.key === 'ArrowRight') { e.preventDefault(); vwStep(1) }
+  if (e.key === '+' || e.key === '=') { e.preventDefault(); vwZoom(1) }
+  if (e.key === '-' || e.key === '_') { e.preventDefault(); vwZoom(-1) }
+  if (e.key === '0') { e.preventDefault(); VW.z = FIT_INDEX; scheduleViewer() }
 })
 
 $('dst-page').addEventListener('change', async (e) => {
@@ -675,11 +678,30 @@ $('sanitize').addEventListener('click', async () => {
 // A plain read-only look at one page, large. The editor is a two-pane redaction
 // tool at 520px per pane, which is no use for reading an A4 page of small print.
 
-const ZOOM = [['Fit', 1], ['150%', 1.5], ['250%', 2.5]]
-const VW = { i: 0, z: 0 }
+// Zoom is expressed as a multiple of fit-to-width, so 100% means "fills the pane".
+const ZOOM_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 6]
+const FIT_INDEX = ZOOM_STEPS.indexOf(1)
+const VW = { i: 0, z: FIT_INDEX }
+
+// Re-rendering the wasm page on every zoom tick would be sluggish, so coalesce
+// rapid clicks into one render.
+let vwPending = null
+function scheduleViewer () {
+  if (vwPending) clearTimeout(vwPending)
+  vwPending = setTimeout(() => { vwPending = null; drawViewer() }, 90)
+  paintZoomLabel()
+}
+
+function paintZoomLabel () {
+  $('vw-pct').textContent = Math.round(ZOOM_STEPS[VW.z] * 100) + '%'
+  $('vw-out').disabled = VW.z === 0
+  $('vw-in').disabled = VW.z === ZOOM_STEPS.length - 1
+  $('vw-fit').disabled = VW.z === FIT_INDEX
+}
 
 async function openViewer (i) {
   VW.i = i
+  VW.z = FIT_INDEX
   $('viewer').hidden = false
   await drawViewer()
 }
@@ -690,15 +712,15 @@ async function drawViewer () {
   $('vw-total').textContent = total
   $('vw-prev').disabled = VW.i === 0
   $('vw-next').disabled = VW.i >= total - 1
-  $('vw-zoom').textContent = ZOOM[VW.z][0]
+  paintZoomLabel()
 
   const stage = $('vw-stage')
-  // clientWidth is 0 on the very first paint because the overlay was display:none
-  // a moment ago, so fall back to the viewport.
+  // clientWidth is 0 on the first paint because the overlay was display:none a
+  // moment ago, so fall back to the viewport.
   const avail = (stage.clientWidth || Math.min(window.innerWidth - 80, 1360)) - 32
-  const cssWidth = Math.max(240, Math.min(avail, 1200) * ZOOM[VW.z][1])
+  const cssWidth = Math.max(200, Math.min(avail, 1200) * ZOOM_STEPS[VW.z])
   try {
-    await busy('Rendering…', () => paint($('vw-canvas'), VW.i, cssWidth))
+    await busy('Rendering\u2026', () => paint($('vw-canvas'), VW.i, cssWidth))
   } catch (err) { toast(err.message, true) }
 }
 
@@ -709,12 +731,48 @@ function vwStep (d) {
   drawViewer()
 }
 
+function vwZoom (d) {
+  const next = Math.max(0, Math.min(ZOOM_STEPS.length - 1, VW.z + d))
+  if (next === VW.z) return
+  VW.z = next
+  scheduleViewer()
+}
+
 $('vw-prev').addEventListener('click', () => vwStep(-1))
 $('vw-next').addEventListener('click', () => vwStep(1))
+$('vw-out').addEventListener('click', () => vwZoom(-1))
+$('vw-in').addEventListener('click', () => vwZoom(1))
+$('vw-fit').addEventListener('click', () => { VW.z = FIT_INDEX; scheduleViewer() })
 $('vw-close').addEventListener('click', () => { $('viewer').hidden = true })
 $('viewer').addEventListener('click', (e) => { if (e.target === $('viewer')) $('viewer').hidden = true })
-$('vw-zoom').addEventListener('click', () => { VW.z = (VW.z + 1) % ZOOM.length; drawViewer() })
 $('vw-edit').addEventListener('click', () => {
   $('viewer').hidden = true
   openEditor(VW.i)
+})
+
+// Ctrl/Cmd + wheel zooms, matching every other document viewer.
+$('vw-stage').addEventListener('wheel', (e) => {
+  if (!e.ctrlKey && !e.metaKey) return
+  e.preventDefault()
+  vwZoom(e.deltaY < 0 ? 1 : -1)
+}, { passive: false })
+
+// Drag to pan once the page is bigger than the pane.
+let pan = null
+$('vw-stage').addEventListener('pointerdown', (e) => {
+  const st = $('vw-stage')
+  if (st.scrollWidth <= st.clientWidth && st.scrollHeight <= st.clientHeight) return
+  pan = { x: e.clientX, y: e.clientY, l: st.scrollLeft, t: st.scrollTop }
+  st.classList.add('grabbing')
+  st.setPointerCapture(e.pointerId)
+})
+$('vw-stage').addEventListener('pointermove', (e) => {
+  if (!pan) return
+  const st = $('vw-stage')
+  st.scrollLeft = pan.l - (e.clientX - pan.x)
+  st.scrollTop = pan.t - (e.clientY - pan.y)
+})
+$('vw-stage').addEventListener('pointerup', () => {
+  pan = null
+  $('vw-stage').classList.remove('grabbing')
 })

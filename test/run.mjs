@@ -249,5 +249,40 @@ const unknown = called.filter((c) => !handlers.includes(c))
 check('every call() targets a real worker handler', unknown.length === 0,
   unknown.length ? 'UNKNOWN: ' + unknown.join(', ') : called.join(', '))
 
+// ---------------------------------------------------------------- class collisions
+//
+// A class that establishes out-of-flow positioning is a layout primitive, not a
+// modifier. Combined with a component class on the same element it silently pulls
+// that component out of flow. This shipped: `.ghost` was both the editor's
+// drag-placement box (position: absolute) and the `.btn.ghost` button variant, so
+// twelve buttons were yanked out of flow and stacked on top of each other.
+group('no positioned class doubles as a modifier')
+const singleClassRules = [...css.matchAll(/^\.([a-zA-Z][\w-]*)\s*\{([^}]*)\}/gm)]
+check('parsed the stylesheet', singleClassRules.length > 10, `${singleClassRules.length} single-class rules`)
+
+const positioned = new Set(singleClassRules
+  .filter((m) => /position:\s*(absolute|fixed)/.test(m[2]))
+  .map((m) => m[1]))
+check('found the positioned classes', positioned.size > 0, [...positioned].join(', '))
+
+const collisions = []
+for (const m of html.matchAll(/class="([^"]+)"/g)) {
+  const list = m[1].trim().split(/\s+/)
+  if (list.length < 2) continue
+  for (const c of list) if (positioned.has(c)) collisions.push(`class="${m[1]}" (.${c} is positioned)`)
+}
+check('no positioned class is combined with others', collisions.length === 0,
+  collisions.length ? collisions.join('; ') : 'clean')
+
+// Every class referenced in the HTML should actually be defined somewhere, or it
+// is a typo or a leftover.
+const defined = new Set(singleClassRules.map((m) => m[1]))
+for (const m of css.matchAll(/\.([a-zA-Z][\w-]*)/g)) defined.add(m[1])
+const used = new Set()
+for (const m of html.matchAll(/class="([^"]+)"/g)) m[1].trim().split(/\s+/).forEach((c) => used.add(c))
+const undefinedClasses = [...used].filter((c) => !defined.has(c))
+check('every class used in the HTML is defined in the CSS', undefinedClasses.length === 0,
+  undefinedClasses.length ? 'UNDEFINED: ' + undefinedClasses.join(', ') : `${used.size} classes`)
+
 console.log(`\n=========== ${pass} passed, ${fail} failed ===========`)
 process.exit(fail ? 1 : 0)

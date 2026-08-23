@@ -133,7 +133,10 @@ textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset:
 .stage canvas { display: block; background: #fff; }
 #src-stage { cursor: crosshair; }
 .selbox { position: absolute; border: 1.5px solid var(--sel); background: color-mix(in srgb, var(--sel) 14%, transparent); pointer-events: none; }
-.ghost { position: absolute; border: 1.5px dashed var(--sel); background: color-mix(in srgb, var(--sel) 10%, transparent); cursor: move; }
+/* Named .movebox, NOT .ghost: `.ghost` collided with the `.btn.ghost` button
+   variant, and because this rule sets position:absolute every ghost-styled
+   button was pulled out of flow and stacked on top of its neighbours. */
+.movebox { position: absolute; border: 1.5px dashed var(--sel); background: color-mix(in srgb, var(--sel) 10%, transparent); cursor: move; }
 
 /* ------------------------------------------------------------------ feedback */
 .toast {
@@ -209,3 +212,10 @@ textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset:
 }
 .viewer-stage canvas { margin: 0 auto; }
 .viewer-stage canvas { box-shadow: 0 2px 18px rgba(0,0,0,.28); }
+
+.zoomer { display: inline-flex; align-items: center; gap: 2px; }
+.zoomer #vw-pct {
+  min-width: 5.5ch; text-align: center; font-size: 12.5px; color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.viewer-stage.grabbing { cursor: grabbing; }

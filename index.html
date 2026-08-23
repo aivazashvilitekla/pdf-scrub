@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧼</text></svg>">
 </head>
-<body class="notranslate">
+<body>
 
 <header class="bar">
   <div class="brand"><span class="dot"></span>PDF&nbsp;Scrub</div>
@@ -109,7 +109,12 @@
       <div class="row tight">
         <button class="btn small ghost" id="vw-prev" title="Previous page (left arrow)">&#9664;</button>
         <button class="btn small ghost" id="vw-next" title="Next page (right arrow)">&#9654;</button>
-        <button class="btn small ghost" id="vw-zoom" title="Cycle zoom">Fit</button>
+        <span class="zoomer">
+          <button class="btn small ghost" id="vw-out" title="Zoom out (\u2212)">\u2212</button>
+          <span id="vw-pct" title="100% fits the pane width">100%</span>
+          <button class="btn small ghost" id="vw-in" title="Zoom in (+)">+</button>
+        </span>
+        <button class="btn small ghost" id="vw-fit" title="Fit to width (0)">Fit</button>
         <button class="btn small" id="vw-edit">Edit this page</button>
         <button class="btn small ghost" id="vw-close">Close</button>
       </div>
@@ -147,7 +152,7 @@
           <button class="btn small ghost" id="ed-prev" title="Previous page">◀</button>
           <button class="btn small ghost" id="ed-next" title="Next page">▶</button>
         </div>
-        <div class="stage" id="dst-stage"><canvas id="dst-canvas"></canvas><div id="ghost" class="ghost" hidden></div></div>
+        <div class="stage" id="dst-stage"><canvas id="dst-canvas"></canvas><div id="ghost" class="movebox" hidden></div></div>
         <div class="pane-tools">
           <span class="muted" id="move-hint">Select an area on the left first.</span>
           <label class="check"><input type="checkbox" id="keep-orig"> leave the original in place</label>
