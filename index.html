@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Scrub</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧼</text></svg>">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand"><span class="dot"></span>PDF&nbsp;Scrub</div>
+  <div class="bar-actions">
+    <label class="btn" for="file-in">Open PDF</label>
+    <input id="file-in" type="file" accept="application/pdf" hidden>
+    <label class="btn ghost" for="file-add" id="add-label" hidden>Merge in…</label>
+    <input id="file-add" type="file" accept="application/pdf" multiple hidden>
+    <button class="btn ghost" id="undo" disabled>Undo</button>
+    <button class="btn primary" id="download" disabled>Download</button>
+  </div>
+</header>
+
+<div id="boot" class="boot">Loading the PDF engine…</div>
+
+<main id="app" hidden>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>1. Strip the watermark text</h2>
+      <span class="muted" id="doc-stat"></span>
+    </div>
+    <p class="hint">
+      One phrase per line. Matching text is deleted from the file itself, so it stops
+      being selectable, searchable and copyable. Scan first to see what would be hit.
+    </p>
+    <textarea id="needles" rows="3" spellcheck="false"></textarea>
+    <div class="row">
+      <button class="btn" id="scan">Scan</button>
+      <button class="btn primary" id="strip">Strip all occurrences</button>
+      <span id="scan-out" class="result"></span>
+    </div>
+    <p class="hint dim">
+      If a hit is missed, the phrase probably wraps across two lines in that PDF.
+      Add a shorter fragment such as <code>hispanoteca.ru</code> on its own line.
+    </p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>2. Pages</h2>
+      <div class="row tight">
+        <button class="btn small ghost" id="sel-all">Select all</button>
+        <button class="btn small ghost" id="sel-none">Clear</button>
+        <button class="btn small" id="rot-sel">Rotate ⟳</button>
+        <button class="btn small" id="del-sel">Delete</button>
+        <button class="btn small" id="export-sel">Export selected…</button>
+      </div>
+    </div>
+    <p class="hint">Drag a page to reorder it. Click <b>Edit</b> to redact an area or move part of a page somewhere else.</p>
+    <div id="grid" class="grid"></div>
+  </section>
+
+</main>
+
+<!-- ---------------------------------------------------------------- editor -->
+<div id="editor" class="overlay" hidden>
+  <div class="editor-box">
+    <header class="editor-head">
+      <h3>Page <span id="ed-num"></span></h3>
+      <div class="row tight">
+        <span class="muted" id="ed-hint">Drag on the page to select an area.</span>
+        <button class="btn small ghost" id="ed-close">Close</button>
+      </div>
+    </header>
+
+    <div class="editor-body">
+      <div class="pane">
+        <div class="pane-title">Source area</div>
+        <div class="stage" id="src-stage"><canvas id="src-canvas"></canvas><div id="sel-box" class="selbox" hidden></div></div>
+        <div class="pane-tools">
+          <button class="btn small" id="clear-sel" disabled>Clear selection</button>
+          <label class="check"><input type="checkbox" id="kill-art" checked> also remove images / artwork</label>
+          <button class="btn small danger" id="do-redact" disabled>Delete this area</button>
+        </div>
+      </div>
+
+      <div class="pane">
+        <div class="pane-title">Move it to another page</div>
+        <div class="row tight">
+          <label class="check">Target page
+            <select id="dst-page"></select>
+          </label>
+          <button class="btn small ghost" id="ed-prev">◀</button>
+          <button class="btn small ghost" id="ed-next">▶</button>
+        </div>
+        <div class="stage" id="dst-stage"><canvas id="dst-canvas"></canvas><div id="ghost" class="ghost" hidden></div></div>
+        <div class="pane-tools">
+          <span class="muted" id="move-hint">Select an area on the left first.</span>
+          <label class="check"><input type="checkbox" id="keep-orig"> leave the original in place</label>
+          <button class="btn small primary" id="do-move" disabled>Move here</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<div id="busy" class="busy" hidden><div class="spinner"></div><span id="busy-text">Working…</span></div>
+
+<footer class="foot">
+  Runs entirely in your browser. The PDF is never uploaded anywhere.
+  Built on <a href="https://mupdf.com/" target="_blank" rel="noreferrer">MuPDF</a> (AGPL-3.0-or-later)
+  and <a href="https://pdf-lib.js.org/" target="_blank" rel="noreferrer">pdf-lib</a> (MIT).
+  <a href="SOURCE.md">Source</a>.
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

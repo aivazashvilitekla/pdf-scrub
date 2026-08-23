@@ -1,0 +1,12 @@
+{
+  "name": "pdf-scrub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser-only PDF watermark stripper and light page editor.",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "dev": "python3 -m http.server 8123 --bind 127.0.0.1",
+    "test": "node test/run.mjs"
+  },
+  "type": "module"
+}
