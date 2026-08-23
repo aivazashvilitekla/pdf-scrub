@@ -219,3 +219,22 @@ textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset:
   font-variant-numeric: tabular-nums;
 }
 .viewer-stage.grabbing { cursor: grabbing; }
+
+
+/* ------------------------------------------------------------------ text editing
+   The wrap is sized by the canvas, so an absolutely positioned overlay inside it
+   lines up with the rendered page exactly. */
+.vwwrap { position: relative; display: inline-block; }
+.vwlayer { position: absolute; inset: 0; }
+.tline {
+  position: absolute; cursor: text; border-radius: 2px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.tline:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.tedit {
+  position: absolute; z-index: 5; font: inherit; line-height: 1.1;
+  border: 1.5px solid var(--accent); border-radius: 2px; padding: 0 2px;
+  background: var(--surface); color: var(--ink);
+}
+.tedit:focus { outline: 2px solid var(--accent); outline-offset: 1px; }

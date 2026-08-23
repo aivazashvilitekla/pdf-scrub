@@ -18,6 +18,25 @@ removed, not painted over.
 `+` / `-` / `0` or Ctrl-scroll zoom from 50% to 600% (100% fits the pane), and drag
 to pan once the page is bigger than the window.
 
+**Edit text.** Open a page, hit *Edit text*, and every line of text becomes
+clickable. Click one, retype it, press Enter. The original glyphs are deleted and
+the replacement is drawn on the same baseline at the same size, in a matched face
+(serif/sans/mono, bold, italic) and the line's original colour, all detected from
+the file. Clearing the box deletes the line. One Undo reverts the whole edit.
+
+Two limits worth knowing before you rely on it:
+
+- **Nothing reflows.** A PDF stores the printed result, not a document model:
+  each line is an independently positioned run of glyphs with no paragraph
+  relationship. A longer replacement runs past the original line's width rather
+  than rewrapping the paragraph or pushing later lines down. Acrobat has the same
+  limitation for the same reason. This is not Word and cannot be.
+- **Western European text only.** Replacements use the fonts built into every PDF
+  reader, so they add nothing to page weight and always render. That covers all
+  Spanish and Western European text, including accents, em dashes and curly
+  quotes, but not Cyrillic or Greek. Typing an unencodable character is refused
+  *before* anything is deleted, so a rejected edit never costs you the original.
+
 **Page operations.** Reorder by dragging, rotate, delete, merge other PDFs in,
 and export a selection of pages as a new file.
 
@@ -63,7 +82,7 @@ blocked on `file://`.
 
     npm test
 
-47 assertions driving the real `worker.js` in Node against checked-in fixtures.
+59 assertions driving the real `worker.js` in Node against checked-in fixtures.
 No dependencies to install; it uses the libraries already in `vendor/`.
 
 Three of those groups exist because there is no browser in the loop:
@@ -84,6 +103,11 @@ Three of those groups exist because there is no browser in the loop:
   `.movebox`, and the test fails if any positioned class is ever combined again.
 - **Every class used in the HTML is defined in the CSS**, which catches typos and
   leftovers.
+- **A refused text edit destroys nothing.** `replaceLine` deletes the old glyphs
+  and then draws the new ones, so validating the font encoding *after* the
+  deletion would lose the original text with nothing to put back. The test drives
+  a Cyrillic replacement through the real worker and asserts the page is byte-for-
+  byte unchanged.
 
 ## Deploy to Vercel
 
@@ -120,6 +144,18 @@ On open, the file is re-saved through MuPDF before anything else touches it.
 MuPDF decrypts properly and pdf-lib does not, and ebooks are often encrypted with
 an empty user password - which means a file can look unprotected while its streams
 are not. Normalising up front removes that trap and repairs minor damage.
+
+## Caching
+
+`vendor/` is immutable and cached for a year. The app's own files
+(`index.html`, `app.js`, `worker.js`, `styles.css`) are served
+`max-age=0, must-revalidate` and their URLs carry a `?v=` query.
+
+Both halves matter. Without the header the CDN and browser cache the app
+indefinitely; without the version bump an already-cached copy is never
+revalidated, so a browser holding an old stylesheet keeps using it. Bump the `?v=`
+in `index.html` (and the `worker.js?v=` in `app.js`, in step) whenever a fix has
+to reach people who already loaded the page.
 
 ## Known limitations
 

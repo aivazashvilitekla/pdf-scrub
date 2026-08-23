@@ -284,5 +284,64 @@ const undefinedClasses = [...used].filter((c) => !defined.has(c))
 check('every class used in the HTML is defined in the CSS', undefinedClasses.length === 0,
   undefinedClasses.length ? 'UNDEFINED: ' + undefinedClasses.join(', ') : `${used.size} classes`)
 
+// ---------------------------------------------------------------- text editing
+group('replace text line by line')
+const td = await PDFDocument.create()
+const tf = await td.embedFont(StandardFonts.Helvetica)
+const tp = td.addPage([400, 300])
+tp.drawText('Precio: 25 euros', { x: 40, y: 240, size: 14, font: tf })
+tp.drawText('No cambiar esta linea', { x: 40, y: 200, size: 14, font: tf })
+const textFixture = new Uint8Array(await td.save())
+
+await call('load', { bytes: textFixture.slice().buffer })
+let tl = await call('textLines', { index: 0 })
+check('finds both lines', tl.lines.length === 2, tl.lines.map((l) => JSON.stringify(l.text)).join(', '))
+const target = tl.lines.find((l) => l.text.includes('Precio'))
+check('reports a baseline', target && target.y > 0, target && `baseline y=${target.y.toFixed(1)}`)
+check('reports the size', target && Math.round(target.size) === 14, target && `size=${target.size}`)
+check('reports a colour', Array.isArray(target.color) && target.color.length === 3, JSON.stringify(target.color))
+
+await call('replaceLine', { ...target, index: 0, text: 'Precio: 40 euros' })
+let txt = textOf((await call('download')).bytes)[0].replace(/\s+/g, ' ')
+check('new text is present', txt.includes('Precio: 40 euros'), JSON.stringify(txt))
+check('old text is gone', !txt.includes('25 euros'))
+check('the other line is untouched', txt.includes('No cambiar esta linea'))
+// One edit must be one undo step: replaceLine redacts and then draws, so a
+// careless second snapshot would make the user press Undo twice.
+const undone = textOf((await call('undo')).pages ? (await call('download')).bytes : (await call('download')).bytes)[0]
+check('one Undo fully reverts the edit',
+  undone.includes('25 euros') && !undone.includes('40 euros'),
+  JSON.stringify(undone.replace(/\s+/g, ' ')))
+
+// Accents must survive: WinAnsi covers them and this is a Spanish-language tool.
+await call('load', { bytes: textFixture.slice().buffer })
+tl = await call('textLines', { index: 0 })
+await call('replaceLine', { ...tl.lines.find((l) => l.text.includes('Precio')), index: 0, text: 'Habría 3 años ñ ü' })
+txt = textOf((await call('download')).bytes)[0]
+check('Spanish accents render', txt.includes('Habría 3 años'), JSON.stringify(txt.replace(/\s+/g, ' ').slice(0, 60)))
+
+// Clearing a line deletes it.
+await call('load', { bytes: textFixture.slice().buffer })
+tl = await call('textLines', { index: 0 })
+await call('replaceLine', { ...tl.lines.find((l) => l.text.includes('Precio')), index: 0, text: '   ' })
+txt = textOf((await call('download')).bytes)[0]
+check('blanking a line removes it', !txt.includes('Precio') && txt.includes('No cambiar'))
+
+// The critical failure case: an unencodable character must be refused BEFORE the
+// original text is deleted, or the edit destroys content and puts nothing back.
+await call('load', { bytes: textFixture.slice().buffer })
+tl = await call('textLines', { index: 0 })
+const before = textOf((await call('download')).bytes)[0]
+let refused = false
+try {
+  await call('replaceLine', { ...tl.lines.find((l) => l.text.includes('Precio')), index: 0, text: 'Книги' })
+} catch (e) {
+  refused = /cannot render/.test(e.message)
+}
+check('Cyrillic is refused with a clear message', refused)
+const after = textOf((await call('download')).bytes)[0]
+check('a refused edit destroys nothing', after === before,
+  after === before ? 'original intact' : 'DATA LOSS: ' + JSON.stringify(after))
+
 console.log(`\n=========== ${pass} passed, ${fail} failed ===========`)
 process.exit(fail ? 1 : 0)

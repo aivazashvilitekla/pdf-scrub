@@ -12,7 +12,7 @@
 //                       moveRegion(), against the page's CropBox (which is what MuPDF renders).
 
 import * as mupdf from './vendor/mupdf/mupdf.js'
-import { PDFDocument, degrees } from './vendor/pdf-lib.esm.min.js'
+import { PDFDocument, StandardFonts, degrees, rgb } from './vendor/pdf-lib.esm.min.js'
 
 let bytes = null      // Uint8Array: the current document, single source of truth
 let doc = null        // cached MuPDF PDFDocument opened from `bytes`
@@ -298,6 +298,132 @@ async function extract (indices) {
   return { bytes: new Uint8Array(await out.save()) }
 }
 
+// ---------------------------------------------------------------- text editing
+//
+// A PDF stores the printed result, not a document model: each line is an
+// independently positioned run of glyphs with no paragraph relationship. So text
+// can be replaced line by line, but nothing reflows - a longer replacement will
+// not rewrap the paragraph or push the following lines down. This is the same
+// limitation Acrobat has, for the same reason.
+
+const STD = {
+  sans:  ['Helvetica', 'HelveticaBold', 'HelveticaOblique', 'HelveticaBoldOblique'],
+  serif: ['TimesRoman', 'TimesRomanBold', 'TimesRomanItalic', 'TimesRomanBoldItalic'],
+  mono:  ['Courier', 'CourierBold', 'CourierOblique', 'CourierBoldOblique'],
+}
+const stdName = (family, bold, italic) =>
+  (STD[family] || STD.sans)[(bold ? 1 : 0) + (italic ? 2 : 0)]
+
+// MuPDF colours are 1 (gray), 3 (RGB) or 4 (CMYK) components, 0..1.
+function normColor (c) {
+  if (!Array.isArray(c)) return [0, 0, 0]
+  if (c.length === 1) return [c[0], c[0], c[0]]
+  if (c.length === 3) return c
+  if (c.length === 4) {
+    const [cy, m, y, k] = c
+    return [1 - Math.min(1, cy + k), 1 - Math.min(1, m + k), 1 - Math.min(1, y + k)]
+  }
+  return [0, 0, 0]
+}
+
+function textLines ({ index }) {
+  const d = openPdf()
+  const page = d.loadPage(index)
+  const st = page.toStructuredText()
+  const lines = []
+  let cur = null
+  st.walk({
+    beginLine (bbox) { cur = { bbox, text: '' } },
+    onChar (c, origin, font, size, quad, color) {
+      if (!cur) return
+      if (!cur.text.length) {
+        // The first character carries the line's baseline, size, face and colour.
+        cur.x = origin[0]
+        cur.y = origin[1]
+        cur.size = size
+        cur.color = color
+        try {
+          cur.name = font.getName()
+          cur.bold = font.isBold()
+          cur.italic = font.isItalic()
+          cur.family = font.isMono() ? 'mono' : (font.isSerif() ? 'serif' : 'sans')
+        } catch (e) {}
+      }
+      cur.text += c
+    },
+    endLine () {
+      if (cur && cur.text.trim()) {
+        lines.push({
+          rect: [cur.bbox[0], cur.bbox[1], cur.bbox[2], cur.bbox[3]],
+          x: cur.x, y: cur.y,
+          size: cur.size || 12,
+          text: cur.text,
+          name: cur.name || '',
+          bold: !!cur.bold,
+          italic: !!cur.italic,
+          family: cur.family || 'sans',
+          color: normColor(cur.color),
+        })
+      }
+      cur = null
+    },
+  })
+  try { st.destroy() } catch (e) {}
+  try { page.destroy() } catch (e) {}
+  return { index, lines }
+}
+
+async function replaceLine ({ index, rect, x, y, size, text, family = 'sans', bold = false, italic = false, color = [0, 0, 0] }) {
+  const next = String(text == null ? '' : text)
+
+  // Validate BEFORE deleting anything. Redacting first and then discovering the
+  // font cannot encode the replacement would destroy the original text and leave
+  // nothing in its place.
+  const faceName = stdName(family, bold, italic)
+  if (next.trim()) {
+    const probe = await PDFDocument.create()
+    const probeFont = await probe.embedFont(StandardFonts[faceName])
+    const bad = [...new Set(Array.from(next))].filter((ch) => {
+      if (ch === '\n' || ch === '\r') return true
+      try { probeFont.widthOfTextAtSize(ch, 10); return false } catch (e) { return true }
+    })
+    if (bad.length) {
+      throw new Error(
+        'The built-in fonts cover Western European text only and cannot render: ' +
+        bad.map((c) => JSON.stringify(c)).join(' '))
+    }
+  }
+
+  // 1. delete the old glyphs. Text only: artwork behind the line is left alone.
+  const d = openPdf()
+  const page = d.loadPage(index)
+  const annot = page.createAnnotation('Redact')
+  annot.setRect(rect)
+  annot.update()
+  page.applyRedactions(false, 0, 0, 0)
+  commit(saveMupdf(d))
+  try { page.destroy() } catch (e) {}
+
+  // Clearing a line is a legitimate way to delete it.
+  if (!next.trim()) return meta()
+
+  // 2. draw the replacement on the same baseline.
+  const doc = await loadLib(bytes)
+  const font = await doc.embedFont(StandardFonts[faceName])
+  const target = doc.getPage(index)
+  const cb = target.getCropBox()
+  const [r, g, b] = color.map((v) => Math.max(0, Math.min(1, Number(v) || 0)))
+  target.drawText(next, {
+    x: cb.x + x,
+    y: cb.y + (cb.height - y),   // MuPDF baseline is top-left origin, pdf-lib bottom-left
+    size,
+    font,
+    color: rgb(r, g, b),
+  })
+  commit(new Uint8Array(await doc.save()), { snapshot: false })   // same user action
+  return meta()
+}
+
 // ---------------------------------------------------------------- safety scan
 //
 // PDFs can carry JavaScript, auto-run actions, launch actions and embedded
@@ -460,6 +586,8 @@ const handlers = {
   extract: ({ indices }) => extract(indices),
   inspect,
   sanitize,
+  textLines,
+  replaceLine,
   download: () => ({ bytes: new Uint8Array(bytes) }),
   undo,
 }

@@ -8,7 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="google" content="notranslate">
 <title>PDF Scrub</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=3">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧼</text></svg>">
 </head>
 <body>
@@ -115,11 +115,18 @@
           <button class="btn small ghost" id="vw-in" title="Zoom in (+)">+</button>
         </span>
         <button class="btn small ghost" id="vw-fit" title="Fit to width (0)">Fit</button>
-        <button class="btn small" id="vw-edit">Edit this page</button>
+        <button class="btn small" id="vw-text" title="Click a line of text to retype it">Edit text</button>
+        <span class="muted" id="vw-count"></span>
+        <button class="btn small" id="vw-edit">Redact / move</button>
         <button class="btn small ghost" id="vw-close">Close</button>
       </div>
     </header>
-    <div class="stage viewer-stage" id="vw-stage"><canvas id="vw-canvas"></canvas></div>
+    <div class="stage viewer-stage" id="vw-stage">
+      <div id="vw-wrap" class="vwwrap">
+        <canvas id="vw-canvas"></canvas>
+        <div id="vw-layer" class="vwlayer" hidden></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -173,6 +180,6 @@
   <a href="SOURCE.md">Source</a>.
 </footer>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=3"></script>
 </body>
 </html>

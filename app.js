@@ -6,7 +6,9 @@ const $ = (id) => document.getElementById(id)
 
 // ------------------------------------------------------------------ worker RPC
 
-const worker = new Worker('worker.js', { type: 'module' })
+// Version query in step with index.html: without it a stale worker.js can be
+// served from cache against a fresh app.js.
+const worker = new Worker('worker.js?v=3', { type: 'module' })
 const pending = new Map()
 let seq = 0
 
@@ -702,6 +704,7 @@ function paintZoomLabel () {
 async function openViewer (i) {
   VW.i = i
   VW.z = FIT_INDEX
+  setTextMode(false)
   $('viewer').hidden = false
   await drawViewer()
 }
@@ -720,15 +723,17 @@ async function drawViewer () {
   const avail = (stage.clientWidth || Math.min(window.innerWidth - 80, 1360)) - 32
   const cssWidth = Math.max(200, Math.min(avail, 1200) * ZOOM_STEPS[VW.z])
   try {
-    await busy('Rendering\u2026', () => paint($('vw-canvas'), VW.i, cssWidth))
-  } catch (err) { toast(err.message, true) }
+    VW.scale = await busy('Rendering\u2026', () => paint($('vw-canvas'), VW.i, cssWidth))
+  } catch (err) { toast(err.message, true); return }
+  if (textMode) drawTextLayer()
 }
 
-function vwStep (d) {
+async function vwStep (d) {
   const next = VW.i + d
   if (next < 0 || next >= S.pages.length) return
   VW.i = next
-  drawViewer()
+  await drawViewer()
+  if (textMode) await loadTextLines()
 }
 
 function vwZoom (d) {
@@ -776,3 +781,109 @@ $('vw-stage').addEventListener('pointerup', () => {
   pan = null
   $('vw-stage').classList.remove('grabbing')
 })
+
+
+// ------------------------------------------------------------------ text editing
+//
+// A PDF has no paragraph model, so this replaces text one line at a time and
+// nothing reflows. See the note above replaceLine() in worker.js.
+
+let textMode = false
+let textLines = []
+
+function setTextMode (on) {
+  textMode = on
+  $('vw-text').classList.toggle('primary', on)
+  $('vw-layer').hidden = !on
+  if (!on) {
+    $('vw-layer').textContent = ''
+    $('vw-count').textContent = ''
+    textLines = []
+  }
+}
+
+$('vw-text').addEventListener('click', async () => {
+  setTextMode(!textMode)
+  if (textMode) await loadTextLines()
+})
+
+async function loadTextLines () {
+  try {
+    const res = await busy('Finding text\u2026', () => call('textLines', { index: VW.i }))
+    textLines = res.lines
+    drawTextLayer()
+  } catch (err) {
+    toast(err.message, true)
+    setTextMode(false)
+  }
+}
+
+function drawTextLayer () {
+  const layer = $('vw-layer')
+  layer.textContent = ''
+  if (!textMode) return
+  const s = VW.scale || 1
+  textLines.forEach((ln, i) => {
+    const box = document.createElement('div')
+    box.className = 'tline'
+    box.style.left = ln.rect[0] * s + 'px'
+    box.style.top = ln.rect[1] * s + 'px'
+    box.style.width = Math.max(8, (ln.rect[2] - ln.rect[0]) * s) + 'px'
+    box.style.height = Math.max(8, (ln.rect[3] - ln.rect[1]) * s) + 'px'
+    box.title = ln.text
+    box.addEventListener('click', (e) => { e.stopPropagation(); editLine(i, box) })
+    layer.appendChild(box)
+  })
+  $('vw-count').textContent = textLines.length
+    ? `${textLines.length} line${textLines.length === 1 ? '' : 's'} \u2013 click one to retype it`
+    : 'no text layer on this page'
+}
+
+function editLine (i, box) {
+  const ln = textLines[i]
+  const s = VW.scale || 1
+  const input = document.createElement('input')
+  input.className = 'tedit'
+  input.value = ln.text
+  input.style.left = box.style.left
+  input.style.top = box.style.top
+  // Give it room to grow: the replacement is usually longer than the original.
+  input.style.width = Math.max(80, parseFloat(box.style.width) + 60) + 'px'
+  input.style.height = Math.max(16, parseFloat(box.style.height) + 4) + 'px'
+  input.style.fontSize = Math.max(9, ln.size * s * 0.9) + 'px'
+  $('vw-layer').appendChild(input)
+  input.focus()
+  input.select()
+
+  let settled = false
+  const finish = async (save) => {
+    if (settled) return
+    settled = true
+    const value = input.value
+    input.remove()
+    if (!save || value === ln.text) return
+    try {
+      await apply('Replacing text\u2026', 'replaceLine', {
+        index: VW.i,
+        rect: ln.rect, x: ln.x, y: ln.y, size: ln.size,
+        text: value,
+        family: ln.family, bold: ln.bold, italic: ln.italic, color: ln.color,
+      })
+      // apply() calls adopt(), which closes every overlay because page indices
+      // may have moved. Nothing structural changed here, so come straight back.
+      $('viewer').hidden = false
+      setTextMode(true)
+      await drawViewer()
+      await loadTextLines()
+      toast(value.trim() ? 'Text replaced.' : 'Line removed.')
+    } catch (err) { /* apply() has already surfaced the message */ }
+  }
+
+  // Stop keys reaching the viewer's own arrow/zoom shortcuts while typing.
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation()
+    if (e.key === 'Enter') { e.preventDefault(); finish(true) }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false) }
+  })
+  input.addEventListener('blur', () => finish(true))
+}
