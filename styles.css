@@ -22,6 +22,13 @@
 }
 
 * { box-sizing: border-box; }
+
+/* The hidden attribute must beat any class rule that sets a display value.
+   [hidden] from the browser stylesheet is specificity 0,1,0 - the same as a class
+   selector - so an author rule like `.busy { display: grid }` wins on cascade order
+   and the element stays on screen forever. Every overlay in this file is toggled
+   with .hidden, so this rule is load-bearing, not defensive tidiness. */
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   background: var(--bg); color: var(--ink);

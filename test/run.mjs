@@ -126,5 +126,40 @@ t = textOf((await call('download')).bytes)
 check('area contents removed', !t[0].includes('KEEPME'))
 check('rest of the page untouched', t[0].includes('LEAKME'))
 
+// ---------------------------------------------------------------- CSS/DOM guard
+//
+// Every overlay in this app is shown and hidden with the `hidden` attribute.
+// [hidden] { display: none } in the browser's own stylesheet has specificity
+// 0,1,0 - identical to a class selector - so an author rule such as
+// `.busy { display: grid }` wins on cascade order and pins the element on screen
+// permanently. That shipped once and made the app look frozen behind a dead
+// "Working..." overlay, so it is worth a test even though no browser runs here.
+group('CSS cannot defeat the hidden attribute')
+const css = fs.readFileSync(path.join(HERE, '..', 'styles.css'), 'utf8')
+const html = fs.readFileSync(path.join(HERE, '..', 'index.html'), 'utf8')
+const js = fs.readFileSync(path.join(HERE, '..', 'app.js'), 'utf8')
+
+const globalRule = /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css)
+check('a global [hidden] display:none !important rule exists', globalRule)
+
+// Cross-check: for every id toggled via .hidden, does its class declare a display?
+const toggled = [...new Set([...js.matchAll(/\$\('([a-z-]+)'\)\.hidden/g)].map((m) => m[1]))]
+check('found the elements toggled via .hidden', toggled.length > 0, toggled.join(', '))
+
+const conflicts = []
+for (const id of toggled) {
+  const tag = html.match(new RegExp(`<[^>]*id="${id}"[^>]*>`))
+  if (!tag) continue
+  const cls = (tag[0].match(/class="([^"]*)"/) || [, ''])[1].split(/\s+/).filter(Boolean)
+  for (const c of cls) {
+    const rule = css.match(new RegExp(`(^|\\n)\\.${c}\\s*\\{[^}]*\\}`))
+    if (rule && /display:\s*[a-z-]+/.test(rule[0])) conflicts.push(`#${id} (.${c})`)
+  }
+}
+// Conflicts are fine *provided* the global rule neutralises them.
+check('every display-declaring overlay is covered by the global rule',
+  conflicts.length === 0 || globalRule,
+  conflicts.length ? `relies on the global rule: ${conflicts.join(', ')}` : 'no conflicts at all')
+
 console.log(`\n=========== ${pass} passed, ${fail} failed ===========`)
 process.exit(fail ? 1 : 0)
