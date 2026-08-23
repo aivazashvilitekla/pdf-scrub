@@ -27,6 +27,24 @@ a PDF Form XObject, so text stays crisp real text rather than a screenshot. This
 the fix for a page that wastes a whole sheet on two lines: move the lines onto the
 next page, delete the image, delete the empty page.
 
+**Safety check.** For files downloaded from the internet. Walks every indirect
+object looking for JavaScript, actions that fire when the file opens, launch
+actions, remote-document jumps, XFA forms and embedded files, then lists any
+external links. *Remove active content* strips all of it and rebuilds the file.
+
+Objects are walked individually rather than keyword-searched, because most objects
+live inside compressed object streams where a text search finds nothing at all.
+There is a command-line version for a file already on disk:
+
+    node tools/inspect.mjs some.pdf
+    node tools/inspect.mjs some.pdf --sanitize clean.pdf
+
+This reduces risk, it does not eliminate it. It removes active content and
+rebuilds the file structure, which neutralises a whole class of malformed-PDF
+tricks. It cannot detect an exploit aimed at a bug in an image codec, and it is
+not a virus scanner. For something you genuinely distrust, scan it with real
+anti-malware as well.
+
 *Undo* steps back through the last 12 operations.
 
 ## Run it locally
@@ -41,8 +59,19 @@ blocked on `file://`.
 
     npm test
 
-27 assertions driving the real `worker.js` in Node against checked-in fixtures.
+43 assertions driving the real `worker.js` in Node against checked-in fixtures.
 No dependencies to install; it uses the libraries already in `vendor/`.
+
+Three of those groups exist because there is no browser in the loop:
+
+- **`[hidden]` cannot be overridden.** `[hidden] { display: none }` in the browser's
+  own stylesheet has specificity 0,1,0, identical to a class selector, so an author
+  rule like `.busy { display: grid }` wins on cascade order and pins the element on
+  screen forever. That shipped once and made the whole app look frozen behind a dead
+  "Working…" overlay.
+- **Every `$('id')` resolves.** A mistyped id would otherwise surface only as a
+  null-dereference in front of a user.
+- **Every `call()` targets a real worker handler.**
 
 ## Deploy to Vercel
 
@@ -90,6 +119,10 @@ are not. Normalising up front removes that trap and repairs minor damage.
   text, there is nothing for the search to match. Use *Redact an area* instead.
 - **A phrase split across two lines may not match.** Add a shorter fragment such
   as `hispanoteca.ru` on its own line.
+- **The UI is marked `translate="no"`.** The page shows Russian and Spanish text, so
+  a browser translator decides the whole page is foreign and rewrites the interface
+  labels, injecting duplicate text nodes that visibly overlap the originals. If you
+  still see doubled-up button text, a translator extension is overriding this.
 - **Reordering and deleting rebuild the document,** which drops bookmarks and
   document metadata. Rotation alone is applied in place and keeps them.
 

@@ -57,7 +57,11 @@ a { color: var(--accent); }
   white-space: nowrap;
 }
 .btn:hover:not(:disabled) { border-color: var(--ink-dim); }
-.btn:disabled { opacity: .42; cursor: not-allowed; }
+.btn:disabled { cursor: not-allowed; opacity: .5; }
+/* A disabled primary keeps full-strength accent colour otherwise, so it still
+   reads as the thing to click. Drop it back to a neutral surface instead. */
+.btn.primary:disabled { background: var(--line); border-color: var(--line); color: var(--ink-dim); }
+.btn.danger:disabled { color: var(--ink-dim); border-color: var(--line); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.ghost { background: transparent; }
 .btn.small { padding: 5px 10px; font-size: 13px; }
@@ -98,7 +102,8 @@ textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset:
 .card.drag { opacity: .35; }
 .card.over { border-color: var(--sel); border-style: dashed; }
 .card-thumb {
-  aspect-ratio: 1 / 1.35; display: grid; place-items: center; cursor: grab;
+  aspect-ratio: 1 / 1.35; display: grid; place-items: center; cursor: zoom-in;
+  min-height: 0; overflow: hidden;
   background: repeating-conic-gradient(var(--line) 0% 25%, transparent 0% 50%) 50%/12px 12px;
 }
 .card-thumb img { max-width: 100%; max-height: 100%; display: block; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
@@ -145,3 +150,62 @@ textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset:
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .foot { max-width: 1180px; margin: 0 auto; padding: 0 20px 40px; color: var(--ink-dim); font-size: 12.5px; }
+
+
+/* ------------------------------------------------------------------ toolbar
+   Bulk actions get their own row rather than sharing a baseline-aligned flex
+   line with the heading, so a long label can never crowd the title. */
+.toolbar {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 9px 11px; margin-bottom: 14px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+}
+.toolbar .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 3px; }
+
+/* ------------------------------------------------------------------ empty state */
+.hero { max-width: 1180px; margin: 0 auto; padding: 40px 20px 60px; }
+.dropzone {
+  border: 1.5px dashed var(--line); border-radius: 14px;
+  padding: 60px 28px; text-align: center;
+  background: var(--surface); transition: border-color .15s, background .15s;
+}
+.dropzone.hot { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.dz-icon { font-size: 40px; line-height: 1; margin-bottom: 14px; }
+.dropzone h1 { margin: 0 0 10px; font-size: 22px; letter-spacing: -.02em; }
+.dropzone p { color: var(--ink-dim); font-size: 14px; margin: 0 auto 20px; max-width: 52ch; }
+.dropzone .fineprint { font-size: 12.5px; margin: 16px 0 0; }
+
+/* ------------------------------------------------------------------ safety report */
+.safety { margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.safety-verdict { padding: 11px 14px; font-size: 13.5px; font-weight: 550; border-bottom: 1px solid var(--line); }
+.safety-verdict.clean { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.safety-verdict.dirty { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.safety-verdict:last-child { border-bottom: 0; }
+.safety-group { padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.safety-group:last-child { border-bottom: 0; }
+.safety-group h4 { margin: 0 0 7px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-dim); }
+.safety-row { display: flex; gap: 10px; font-size: 13px; padding: 2px 0; align-items: baseline; }
+.safety-row .k { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; min-width: 12ch; }
+.safety-row .n { color: var(--ink-dim); font-variant-numeric: tabular-nums; min-width: 7ch; }
+.safety-row .w { color: var(--ink-dim); }
+.safety-urls { display: grid; gap: 3px; font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+
+.spinner.small { width: 13px; height: 13px; border-width: 2px; display: inline-block; vertical-align: -2px; }
+
+
+/* ------------------------------------------------------------------ viewer */
+.viewer-box {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  width: min(1400px, 100%); max-height: 100%; display: flex; flex-direction: column; overflow: hidden;
+}
+.viewer-stage {
+  flex: 1; min-height: 0; max-height: none; padding: 16px;
+  border: 0; border-top: 1px solid var(--line); border-radius: 0;
+  /* Deliberately block + margin:auto rather than grid centring. A grid-centred
+     item wider than its track overflows equally on both sides and the left edge
+     becomes unreachable by scrolling, which breaks zooming in. margin:auto
+     collapses to 0 once the canvas is wider, so it scrolls from the left. */
+  display: block; text-align: center;
+}
+.viewer-stage canvas { margin: 0 auto; }
+.viewer-stage canvas { box-shadow: 0 2px 18px rgba(0,0,0,.28); }

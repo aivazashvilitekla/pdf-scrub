@@ -298,6 +298,136 @@ async function extract (indices) {
   return { bytes: new Uint8Array(await out.save()) }
 }
 
+// ---------------------------------------------------------------- safety scan
+//
+// PDFs can carry JavaScript, auto-run actions, launch actions and embedded
+// files. We walk every indirect object rather than grepping the raw bytes,
+// because most objects live inside compressed object streams where a keyword
+// search finds nothing at all.
+
+const RISK = {
+  JS:           ['active', 'JavaScript action payload'],
+  JavaScript:   ['active', 'document-level JavaScript'],
+  OpenAction:   ['active', 'runs automatically when the file opens'],
+  AA:           ['active', 'additional actions (page open, field triggers)'],
+  Launch:       ['active', 'launches an external application'],
+  SubmitForm:   ['active', 'submits form data to a URL'],
+  ImportData:   ['active', 'imports data from a file'],
+  GoToR:        ['active', 'jumps into a remote document'],
+  GoToE:        ['active', 'jumps into an embedded document'],
+  RichMedia:    ['active', 'embedded Flash or video media'],
+  XFA:          ['active', 'XFA form, which has its own scripting engine'],
+  EmbeddedFile: ['embed',  'a file embedded inside the PDF'],
+  EF:           ['embed',  'embedded-file reference'],
+  Filespec:     ['embed',  'file specification carrying an embedded payload'],
+  FileRef:      ['info',   'reference to an external file, no embedded payload'],
+  Screen:       ['active', 'screen annotation'],
+  '3D':         ['active', '3D annotation'],
+  URI:          ['info',   'external link'],
+  AcroForm:     ['info',   'interactive form'],
+  Movie:        ['info',   'movie annotation'],
+  Sound:        ['info',   'sound annotation'],
+}
+
+const STRIPPABLE = ['JS', 'JavaScript', 'OpenAction', 'AA', 'Launch', 'SubmitForm',
+                    'ImportData', 'GoToR', 'GoToE', 'RichMedia', 'XFA', 'EmbeddedFile', 'EF']
+
+function walkRisks (d, onHit) {
+  const total = d.countObjects()
+  for (let num = 1; num < total; num++) {
+    let obj
+    try { obj = d.newIndirect(num).resolve() } catch (e) { continue }
+    if (!obj || obj.isNull() || !obj.isDictionary()) continue
+    try {
+      obj.forEach((val, key) => {
+        const k = String(key)
+        if (RISK[k]) onHit(k, num, obj)
+        if ((k === 'S' || k === 'Subtype' || k === 'Type') && val && !val.isNull()) {
+          let name = null
+          try { name = val.asName() } catch (e) {}
+          if (name && RISK[name]) onHit(name, num, obj)
+        }
+      })
+    } catch (e) {}
+  }
+}
+
+function summarise (counts) {
+  const out = { active: [], embed: [], info: [], urls: [] }
+  for (const [label, n] of counts) {
+    const [sev, why] = RISK[label]
+    out[sev].push({ key: label, count: n, why })
+  }
+  for (const k of ['active', 'embed', 'info']) out[k].sort((a, b) => b.count - a.count)
+  return out
+}
+
+function inspect () {
+  const d = openPdf()
+  const counts = new Map()
+  const urls = new Set()
+  walkRisks(d, (label, num, obj) => {
+    let key = label
+    if (label === 'Filespec') {
+      let hasPayload = false
+      try { const ef = obj.get('EF'); hasPayload = !!(ef && !ef.isNull()) } catch (e) {}
+      if (!hasPayload) key = 'FileRef'
+    }
+    counts.set(key, (counts.get(key) || 0) + 1)
+    if (key === 'URI' && urls.size < 50) {
+      try { const u = obj.get('URI'); if (u && !u.isNull()) urls.add(u.asString()) } catch (e) {}
+    }
+  })
+  const report = summarise([...counts])
+  report.urls = [...urls]
+  report.objects = d.countObjects()
+  return report
+}
+
+function sanitize () {
+  const d = openPdf()
+  let removed = 0
+  const total = d.countObjects()
+  for (let num = 1; num < total; num++) {
+    let obj
+    try { obj = d.newIndirect(num).resolve() } catch (e) { continue }
+    if (!obj || obj.isNull() || !obj.isDictionary()) continue
+    for (const k of STRIPPABLE) {
+      try {
+        const v = obj.get(k)
+        if (v && !v.isNull()) { obj.delete(k); removed++ }
+      } catch (e) {}
+    }
+  }
+  // The catalog holds the document-level JavaScript name tree and the XFA form.
+  try {
+    const root = d.getTrailer().get('Root')
+    const drop = (parent, key) => {
+      if (!parent || parent.isNull()) return
+      try {
+        const v = parent.get(key)
+        if (v && !v.isNull()) { parent.delete(key); removed++ }
+      } catch (e) {}
+    }
+    drop(root, 'OpenAction')
+    drop(root, 'AA')
+    try { drop(root.get('Names'), 'JavaScript') } catch (e) {}
+    try { drop(root.get('AcroForm'), 'XFA') } catch (e) {}
+  } catch (e) {}
+
+  if (removed) {
+    // garbage=deduplicate drops objects nothing references any more, so the
+    // stripped payloads are not left orphaned inside the file.
+    let buf
+    try { buf = d.saveToBuffer('compress=yes,garbage=deduplicate,sanitize=yes') }
+    catch (e) { buf = d.saveToBuffer('compress=yes,garbage=compact') }
+    const next = copyOut(buf.asUint8Array())
+    try { buf.destroy() } catch (e) {}
+    commit(next)
+  }
+  return { removed, report: inspect(), meta: meta() }
+}
+
 function undo () {
   if (!undoStack.length) throw new Error('Nothing to undo.')
   bytes = undoStack.pop()
@@ -328,6 +458,8 @@ const handlers = {
   pageOps: (m) => pageOps(m),
   append: ({ bytes: b }) => append(new Uint8Array(b)),
   extract: ({ indices }) => extract(indices),
+  inspect,
+  sanitize,
   download: () => ({ bytes: new Uint8Array(bytes) }),
   undo,
 }

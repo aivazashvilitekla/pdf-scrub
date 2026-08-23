@@ -1,13 +1,17 @@
 <!doctype html>
-<html lang="en">
+<!-- translate="no" is deliberate: this page shows Russian and Spanish text, so a
+     browser translator will decide the whole page is foreign and rewrite the UI
+     labels, injecting duplicate text nodes that visibly overlap the originals. -->
+<html lang="en" translate="no">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="google" content="notranslate">
 <title>PDF Scrub</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧼</text></svg>">
 </head>
-<body>
+<body class="notranslate">
 
 <header class="bar">
   <div class="brand"><span class="dot"></span>PDF&nbsp;Scrub</div>
@@ -21,10 +25,23 @@
   </div>
 </header>
 
-<div id="boot" class="boot">Loading the PDF engine…</div>
+<div id="boot" class="boot"><span class="spinner small"></span> Loading the PDF engine…</div>
 
-<main id="app" hidden>
+<!-- ------------------------------------------------------- empty state -->
+<section id="empty" class="hero" hidden>
+  <div id="dropzone" class="dropzone">
+    <div class="dz-icon" aria-hidden="true">🧼</div>
+    <h1>Drop a PDF here</h1>
+    <p>Strip a repeated watermark line, move part of a page somewhere else,
+       reorder or delete pages, and check the file for active content.</p>
+    <label class="btn primary" for="file-in">Choose a PDF</label>
+    <p class="fineprint">Nothing is uploaded. The file never leaves this browser.</p>
+  </div>
+</section>
 
+<main id="work" hidden>
+
+  <!-- ----------------------------------------------------- strip -->
   <section class="panel">
     <div class="panel-head">
       <h2>1. Strip the watermark text</h2>
@@ -34,7 +51,7 @@
       One phrase per line. Matching text is deleted from the file itself, so it stops
       being selectable, searchable and copyable. Scan first to see what would be hit.
     </p>
-    <textarea id="needles" rows="3" spellcheck="false"></textarea>
+    <textarea id="needles" rows="3" spellcheck="false" translate="no"></textarea>
     <div class="row">
       <button class="btn" id="scan">Scan</button>
       <button class="btn primary" id="strip">Strip all occurrences</button>
@@ -46,22 +63,60 @@
     </p>
   </section>
 
+  <!-- ----------------------------------------------------- pages -->
   <section class="panel">
     <div class="panel-head">
       <h2>2. Pages</h2>
-      <div class="row tight">
-        <button class="btn small ghost" id="sel-all">Select all</button>
-        <button class="btn small ghost" id="sel-none">Clear</button>
-        <button class="btn small" id="rot-sel">Rotate ⟳</button>
-        <button class="btn small" id="del-sel">Delete</button>
-        <button class="btn small" id="export-sel">Export selected…</button>
-      </div>
+      <span class="muted" id="sel-stat">Nothing selected</span>
     </div>
     <p class="hint">Drag a page to reorder it. Click <b>Edit</b> to redact an area or move part of a page somewhere else.</p>
+    <div class="toolbar">
+      <button class="btn small ghost" id="sel-all">Select all</button>
+      <button class="btn small ghost" id="sel-none" disabled>Clear</button>
+      <span class="sep" aria-hidden="true"></span>
+      <button class="btn small" id="rot-sel" disabled>Rotate</button>
+      <button class="btn small danger" id="del-sel" disabled>Delete</button>
+      <button class="btn small" id="export-sel" disabled>Export selected</button>
+    </div>
     <div id="grid" class="grid"></div>
   </section>
 
+  <!-- ----------------------------------------------------- safety -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>3. Safety check</h2>
+      <span class="muted">for files downloaded from the internet</span>
+    </div>
+    <p class="hint">
+      Looks for JavaScript, actions that run when the file opens, launch actions and
+      embedded files, by walking every object in the document. Sanitising removes
+      all of those and rebuilds the file.
+    </p>
+    <div class="row">
+      <button class="btn" id="inspect">Check this file</button>
+      <button class="btn" id="sanitize" disabled>Remove active content</button>
+    </div>
+    <div id="safety-out" class="safety" hidden></div>
+  </section>
+
 </main>
+
+<!-- ---------------------------------------------------------------- viewer -->
+<div id="viewer" class="overlay" hidden>
+  <div class="viewer-box">
+    <header class="editor-head">
+      <h3>Page <span id="vw-num"></span> <span class="muted">of <span id="vw-total"></span></span></h3>
+      <div class="row tight">
+        <button class="btn small ghost" id="vw-prev" title="Previous page (left arrow)">&#9664;</button>
+        <button class="btn small ghost" id="vw-next" title="Next page (right arrow)">&#9654;</button>
+        <button class="btn small ghost" id="vw-zoom" title="Cycle zoom">Fit</button>
+        <button class="btn small" id="vw-edit">Edit this page</button>
+        <button class="btn small ghost" id="vw-close">Close</button>
+      </div>
+    </header>
+    <div class="stage viewer-stage" id="vw-stage"><canvas id="vw-canvas"></canvas></div>
+  </div>
+</div>
 
 <!-- ---------------------------------------------------------------- editor -->
 <div id="editor" class="overlay" hidden>
@@ -79,7 +134,7 @@
         <div class="pane-title">Source area</div>
         <div class="stage" id="src-stage"><canvas id="src-canvas"></canvas><div id="sel-box" class="selbox" hidden></div></div>
         <div class="pane-tools">
-          <button class="btn small" id="clear-sel" disabled>Clear selection</button>
+          <button class="btn small ghost" id="clear-sel" disabled>Clear selection</button>
           <label class="check"><input type="checkbox" id="kill-art" checked> also remove images / artwork</label>
           <button class="btn small danger" id="do-redact" disabled>Delete this area</button>
         </div>
@@ -87,12 +142,10 @@
 
       <div class="pane">
         <div class="pane-title">Move it to another page</div>
-        <div class="row tight">
-          <label class="check">Target page
-            <select id="dst-page"></select>
-          </label>
-          <button class="btn small ghost" id="ed-prev">◀</button>
-          <button class="btn small ghost" id="ed-next">▶</button>
+        <div class="pane-tools">
+          <label class="check">Target page <select id="dst-page"></select></label>
+          <button class="btn small ghost" id="ed-prev" title="Previous page">◀</button>
+          <button class="btn small ghost" id="ed-next" title="Next page">▶</button>
         </div>
         <div class="stage" id="dst-stage"><canvas id="dst-canvas"></canvas><div id="ghost" class="ghost" hidden></div></div>
         <div class="pane-tools">

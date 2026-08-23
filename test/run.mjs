@@ -161,5 +161,93 @@ check('every display-declaring overlay is covered by the global rule',
   conflicts.length === 0 || globalRule,
   conflicts.length ? `relies on the global rule: ${conflicts.join(', ')}` : 'no conflicts at all')
 
+// ---------------------------------------------------------------- safety scan
+//
+// Build a PDF that really does carry active content, so the scanner is tested
+// against a positive case rather than only against clean files.
+group('safety scan and sanitise')
+const base = await PDFDocument.create()
+base.addPage([200, 200])
+const plain = new Uint8Array(await base.save())
+
+const doctored = (() => {
+  const d = mupdf.Document.openDocument(plain, 'application/pdf').asPDF()
+  const root = d.getTrailer().get('Root')
+
+  // an action that runs the moment the file is opened
+  const openAction = d.newDictionary()
+  openAction.put('S', d.newName('JavaScript'))
+  openAction.put('JS', d.newString("app.alert('this should never run')"))
+  root.put('OpenAction', d.addObject(openAction))
+
+  // a document-level JavaScript name tree
+  const jsEntry = d.newDictionary()
+  jsEntry.put('S', d.newName('JavaScript'))
+  jsEntry.put('JS', d.newString('var x = 1'))
+  const jsArray = d.newArray()
+  jsArray.push(d.newString('script0'))
+  jsArray.push(d.addObject(jsEntry))
+  const jsDict = d.newDictionary()
+  jsDict.put('Names', jsArray)
+  const names = d.newDictionary()
+  names.put('JavaScript', d.addObject(jsDict))
+  root.put('Names', d.addObject(names))
+
+  // an embedded file, reachable from the catalog so a garbage pass keeps it
+  const efStream = d.addStream(new TextEncoder().encode('payload bytes'), (() => {
+    const dict = d.newDictionary()
+    dict.put('Type', d.newName('EmbeddedFile'))
+    return dict
+  })())
+  const ef = d.newDictionary()
+  ef.put('F', efStream)
+  const spec = d.newDictionary()
+  spec.put('Type', d.newName('Filespec'))
+  spec.put('F', d.newString('payload.txt'))
+  spec.put('EF', ef)
+  root.put('PdfScrubTestAttachment', d.addObject(spec))
+
+  return d.saveToBuffer('compress=yes').asUint8Array().slice()
+})()
+
+await call('load', { bytes: doctored.slice().buffer })
+let rep = await call('inspect')
+const keysOf = (r) => [...r.active, ...r.embed].map((x) => x.key).sort()
+check('scanner finds the planted active content', rep.active.length > 0, keysOf(rep).join(', '))
+check('scanner finds OpenAction', rep.active.some((x) => x.key === 'OpenAction'))
+check('scanner finds JavaScript', rep.active.some((x) => x.key === 'JS' || x.key === 'JavaScript'))
+check('scanner finds the embedded file', rep.embed.length > 0)
+check('scanner reports how much it walked', rep.objects > 0, `${rep.objects} objects`)
+
+const san = await call('sanitize')
+check('sanitise removed entries', san.removed > 0, `${san.removed} removed`)
+check('post-sanitise report is clean', san.report.active.length === 0 && san.report.embed.length === 0,
+  keysOf(san.report).join(', ') || 'nothing left')
+rep = await call('inspect')
+check('a fresh scan also finds nothing', rep.active.length === 0 && rep.embed.length === 0)
+check('the document still opens and has its page', (await call('meta')).pageCount === 1)
+check('sanitise is undoable', (await call('undo')).pageCount === 1)
+
+await call('load', { bytes: plain.slice().buffer })
+rep = await call('inspect')
+check('a clean file reports clean', rep.active.length === 0 && rep.embed.length === 0)
+
+// ---------------------------------------------------------------- DOM wiring
+//
+// No browser runs here, so a mistyped id in $('...') would only surface as a
+// null-dereference in front of the user. Check every lookup resolves.
+group('every $(id) lookup exists in the HTML')
+const ids = [...new Set([...js.matchAll(/\$\('([A-Za-z0-9_-]+)'\)/g)].map((m) => m[1]))]
+const missing = ids.filter((id) => !new RegExp(`id="${id}"`).test(html))
+check('all ids resolve', missing.length === 0,
+  missing.length ? 'MISSING: ' + missing.join(', ') : `${ids.length} ids checked`)
+
+const handlers = [...new Set([...fs.readFileSync(path.join(HERE, '..', 'worker.js'), 'utf8')
+  .matchAll(/^\s{2}([a-zA-Z]+)[:,]/gm)].map((m) => m[1]))]
+const called = [...new Set([...js.matchAll(/call\('([a-zA-Z]+)'/g)].map((m) => m[1]))]
+const unknown = called.filter((c) => !handlers.includes(c))
+check('every call() targets a real worker handler', unknown.length === 0,
+  unknown.length ? 'UNKNOWN: ' + unknown.join(', ') : called.join(', '))
+
 console.log(`\n=========== ${pass} passed, ${fail} failed ===========`)
 process.exit(fail ? 1 : 0)

@@ -58,9 +58,17 @@ function toast (msg, bad = false) {
   toastTimer = setTimeout(() => { t.hidden = true }, bad ? 6000 : 3200)
 }
 
+// Inline SVG rather than glyphs: U+27F2/U+27F3 are absent from many system font
+// stacks and fall back to tofu boxes.
+const ICON = {
+  rotl: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5h5v-5"/><path d="M2.9 6.1A5.5 5.5 0 1 1 2.5 9.6"/></svg>',
+  rotr: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6.5h-5v-5"/><path d="M13.1 6.1A5.5 5.5 0 1 0 13.5 9.6"/></svg>',
+  del:  '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+}
+
 function boot () {
   $('boot').hidden = true
-  $('app').hidden = false
+  $('empty').hidden = false
   $('needles').value = PRESET
 }
 
@@ -78,6 +86,10 @@ async function apply (label, type, payload) {
 }
 
 function adopt (meta) {
+  // Page indices are about to change, so any open overlay is now pointing at
+  // the wrong page.
+  $('viewer').hidden = true
+  $('editor').hidden = true
   gen++
   thumbQ.length = 0
   for (const url of S.thumbs.values()) URL.revokeObjectURL(url)
@@ -88,14 +100,36 @@ function adopt (meta) {
     `${meta.pageCount} page${meta.pageCount === 1 ? '' : 's'} · ${(meta.size / 1048576).toFixed(2)} MB`
   $('download').disabled = false
   $('add-label').hidden = false
+  $('empty').hidden = true
+  $('work').hidden = false
+  $('sanitize').disabled = true
+  $('safety-out').hidden = true
   renderGrid()
+  syncSelection()
+}
+
+// Bulk actions are meaningless with nothing selected, so they stay disabled
+// rather than being clickable and then complaining via a toast.
+function syncSelection () {
+  const n = S.sel.size
+  const total = S.pages.length
+  $('sel-stat').textContent = n
+    ? `${n} of ${total} page${total === 1 ? '' : 's'} selected`
+    : 'Nothing selected'
+  $('sel-none').disabled = n === 0
+  $('rot-sel').disabled = n === 0
+  $('export-sel').disabled = n === 0
+  $('del-sel').disabled = n === 0 || n === total
+  $('sel-all').disabled = total > 0 && n === total
 }
 
 // ------------------------------------------------------------------ opening files
 
-$('file-in').addEventListener('change', async (e) => {
-  const file = e.target.files[0]
+async function openFile (file) {
   if (!file) return
+  if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
+    return toast('That is not a PDF.', true)
+  }
   S.name = file.name.replace(/\.pdf$/i, '')
   const buf = await file.arrayBuffer()
   try {
@@ -104,7 +138,44 @@ $('file-in').addEventListener('change', async (e) => {
     $('undo').disabled = true
     toast(`Opened ${file.name}`)
   } catch (err) { toast(err.message, true) }
+}
+
+$('file-in').addEventListener('change', async (e) => {
+  await openFile(e.target.files[0])
   e.target.value = ''
+})
+
+// ---- drag and drop, the expected way to open a file in a tool like this
+const dz = $('dropzone')
+let dragDepth = 0
+const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files')
+
+window.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return
+  e.preventDefault()
+  dragDepth++
+  if (!$('empty').hidden) dz.classList.add('hot')
+})
+window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault() })
+window.addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return
+  if (--dragDepth <= 0) { dragDepth = 0; dz.classList.remove('hot') }
+})
+window.addEventListener('drop', async (e) => {
+  if (!hasFiles(e)) return
+  e.preventDefault()
+  dragDepth = 0
+  dz.classList.remove('hot')
+  const file = e.dataTransfer.files[0]
+  if (!file) return
+  // Dropping onto an already-open document means merge, not replace: silently
+  // replacing would throw away edits that have not been downloaded yet.
+  if (!$('work').hidden && S.pages.length) {
+    await apply(`Merging ${file.name}…`, 'append', { bytes: await file.arrayBuffer() })
+    toast(`Merged ${file.name}. Undo if you meant to open it instead.`)
+  } else {
+    await openFile(file)
+  }
 })
 
 $('file-add').addEventListener('change', async (e) => {
@@ -211,6 +282,8 @@ function card (page, i) {
   if (S.thumbs.has(i)) img.src = S.thumbs.get(i)
   else io.observe(img)
   thumb.appendChild(img)
+  thumb.title = 'Click to open this page'
+  thumb.addEventListener('click', () => openViewer(i))
 
   const foot = document.createElement('div')
   foot.className = 'card-foot'
@@ -220,6 +293,7 @@ function card (page, i) {
   cb.addEventListener('change', () => {
     cb.checked ? S.sel.add(i) : S.sel.delete(i)
     el.classList.toggle('sel', cb.checked)
+    syncSelection()
   })
   const num = document.createElement('span')
   num.className = 'num'
@@ -227,15 +301,17 @@ function card (page, i) {
   foot.append(cb, num)
 
   for (const [label, title, act] of [
-    ['⟲', 'Rotate left', 'rotl'],
-    ['⟳', 'Rotate right', 'rotr'],
+    [ICON.rotl, 'Rotate left', 'rotl'],
+    [ICON.rotr, 'Rotate right', 'rotr'],
     ['Edit', 'Redact or move part of this page', 'edit'],
-    ['✕', 'Delete this page', 'del'],
+    [ICON.del, 'Delete this page', 'del'],
   ]) {
     const b = document.createElement('button')
     b.className = 'icon'
-    b.textContent = label
+    if (label.startsWith('<svg')) b.innerHTML = label
+    else b.textContent = label
     b.title = title
+    b.setAttribute('aria-label', title)
     b.addEventListener('click', () => pageAction(act, i))
     foot.appendChild(b)
   }
@@ -282,8 +358,8 @@ function wireDrag (el, i) {
 }
 
 // -------- bulk actions
-$('sel-all').addEventListener('click', () => { S.pages.forEach((_, i) => S.sel.add(i)); renderGrid() })
-$('sel-none').addEventListener('click', () => { S.sel.clear(); renderGrid() })
+$('sel-all').addEventListener('click', () => { S.pages.forEach((_, i) => S.sel.add(i)); renderGrid(); syncSelection() })
+$('sel-none').addEventListener('click', () => { S.sel.clear(); renderGrid(); syncSelection() })
 
 $('rot-sel').addEventListener('click', () => {
   if (!S.sel.size) return toast('Select some pages first.', true)
@@ -379,7 +455,12 @@ async function openEditor (i) {
 
 $('ed-close').addEventListener('click', () => { $('editor').hidden = true })
 $('editor').addEventListener('click', (e) => { if (e.target === $('editor')) $('editor').hidden = true })
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('editor').hidden = true })
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { $('editor').hidden = true; $('viewer').hidden = true; return }
+  if ($('viewer').hidden) return
+  if (e.key === 'ArrowLeft') { e.preventDefault(); vwStep(-1) }
+  if (e.key === 'ArrowRight') { e.preventDefault(); vwStep(1) }
+})
 
 $('dst-page').addEventListener('change', async (e) => {
   ED.dst = Number(e.target.value)
@@ -529,4 +610,111 @@ $('do-move').addEventListener('click', async () => {
   })
   $('editor').hidden = true
   toast(`Moved to page ${ED.dst + 1}.`)
+})
+
+
+// ------------------------------------------------------------------ safety check
+
+const esc = (t) => String(t).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]))
+
+const safetyRow = (r) =>
+  `<div class="safety-row"><span class="k">/${esc(r.key)}</span>` +
+  `<span class="n">${r.count}\u00d7</span><span class="w">${esc(r.why)}</span></div>`
+
+function renderSafety (rep, removedNote) {
+  const box = $('safety-out')
+  const risky = rep.active.length + rep.embed.length
+  let html = ''
+  if (removedNote) html += `<div class="safety-verdict clean">${esc(removedNote)}</div>`
+  html += risky
+    ? `<div class="safety-verdict dirty">${risky} categor${risky === 1 ? 'y' : 'ies'} of active or embedded content found.</div>`
+    : '<div class="safety-verdict clean">No JavaScript, no auto-run actions, no embedded files. Structurally inert.</div>'
+
+  const g = (title, rows) => rows.length
+    ? `<div class="safety-group"><h4>${title}</h4>${rows.map(safetyRow).join('')}</div>` : ''
+  html += g('Active content', rep.active)
+  html += g('Embedded files', rep.embed)
+  html += g('Worth knowing, not a risk', rep.info)
+
+  if (rep.urls && rep.urls.length) {
+    html += `<div class="safety-group"><h4>Links in this file (${rep.urls.length})</h4>` +
+            `<div class="safety-urls">${rep.urls.map((u) => `<div>${esc(u)}</div>`).join('')}</div></div>`
+  }
+  html += `<div class="safety-group"><h4>Scanned</h4><div class="safety-row"><span class="w">` +
+          `${rep.objects} objects, each walked individually rather than keyword-searched \u2013 ` +
+          `most objects sit inside compressed streams where a text search finds nothing.` +
+          `</span></div></div>`
+
+  box.innerHTML = html
+  box.hidden = false
+  $('sanitize').disabled = risky === 0
+  return risky
+}
+
+$('inspect').addEventListener('click', async () => {
+  try {
+    const rep = await busy('Checking the file…', () => call('inspect'))
+    const risky = renderSafety(rep)
+    toast(risky ? 'Active or embedded content found - see the report.' : 'Clean: nothing executable in this file.')
+  } catch (err) { toast(err.message, true) }
+})
+
+$('sanitize').addEventListener('click', async () => {
+  try {
+    const res = await busy('Removing active content…', () => call('sanitize'))
+    if (res.meta && res.meta.pages) adopt(res.meta)
+    renderSafety(res.report, `Removed ${res.removed} entr${res.removed === 1 ? 'y' : 'ies'} and rebuilt the file.`)
+    $('undo').disabled = false
+    toast(`Removed ${res.removed} entr${res.removed === 1 ? 'y' : 'ies'}.`)
+  } catch (err) { toast(err.message, true) }
+})
+
+
+// ------------------------------------------------------------------ page viewer
+//
+// A plain read-only look at one page, large. The editor is a two-pane redaction
+// tool at 520px per pane, which is no use for reading an A4 page of small print.
+
+const ZOOM = [['Fit', 1], ['150%', 1.5], ['250%', 2.5]]
+const VW = { i: 0, z: 0 }
+
+async function openViewer (i) {
+  VW.i = i
+  $('viewer').hidden = false
+  await drawViewer()
+}
+
+async function drawViewer () {
+  const total = S.pages.length
+  $('vw-num').textContent = VW.i + 1
+  $('vw-total').textContent = total
+  $('vw-prev').disabled = VW.i === 0
+  $('vw-next').disabled = VW.i >= total - 1
+  $('vw-zoom').textContent = ZOOM[VW.z][0]
+
+  const stage = $('vw-stage')
+  // clientWidth is 0 on the very first paint because the overlay was display:none
+  // a moment ago, so fall back to the viewport.
+  const avail = (stage.clientWidth || Math.min(window.innerWidth - 80, 1360)) - 32
+  const cssWidth = Math.max(240, Math.min(avail, 1200) * ZOOM[VW.z][1])
+  try {
+    await busy('Rendering…', () => paint($('vw-canvas'), VW.i, cssWidth))
+  } catch (err) { toast(err.message, true) }
+}
+
+function vwStep (d) {
+  const next = VW.i + d
+  if (next < 0 || next >= S.pages.length) return
+  VW.i = next
+  drawViewer()
+}
+
+$('vw-prev').addEventListener('click', () => vwStep(-1))
+$('vw-next').addEventListener('click', () => vwStep(1))
+$('vw-close').addEventListener('click', () => { $('viewer').hidden = true })
+$('viewer').addEventListener('click', (e) => { if (e.target === $('viewer')) $('viewer').hidden = true })
+$('vw-zoom').addEventListener('click', () => { VW.z = (VW.z + 1) % ZOOM.length; drawViewer() })
+$('vw-edit').addEventListener('click', () => {
+  $('viewer').hidden = true
+  openEditor(VW.i)
 })
