@@ -343,5 +343,95 @@ const after = textOf((await call('download')).bytes)[0]
 check('a refused edit destroys nothing', after === before,
   after === before ? 'original intact' : 'DATA LOSS: ' + JSON.stringify(after))
 
+// ---------------------------------------------------------------- scan clean-up
+//
+// Build a fake scan: render the text fixture, then dirty the background the way
+// a flatbed does (gray paper, shading toward the spine, noise) and embed it as a
+// JPEG. A real text line is drawn on top to stand in for an OCR layer. Page 2 is
+// a dark "photo" that whitening must leave alone.
+group('whiten a scanned page')
+const pageMean = (bytes, i) => {
+  const d = mupdf.Document.openDocument(bytes, 'application/pdf')
+  const pm = d.loadPage(i).toPixmap(mupdf.Matrix.scale(0.5, 0.5), mupdf.ColorSpace.DeviceGray, false)
+  const q = pm.getPixels(), st = pm.getStride(), w = pm.getWidth(), h = pm.getHeight()
+  let sum = 0, white = 0
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const v = q[y * st + x]; sum += v; if (v === 255) white++ }
+  return { mean: sum / (w * h), white: white / (w * h) }
+}
+const scanFixture = await (async () => {
+  const src = mupdf.Document.openDocument(cyrillic, 'application/pdf')
+  const s = 100 / 72
+  const pm = src.loadPage(0).toPixmap(mupdf.Matrix.scale(s, s), mupdf.ColorSpace.DeviceRGB, false)
+  const W = pm.getWidth(), H = pm.getHeight(), st = pm.getStride(), n = pm.getNumberOfComponents()
+  const px = pm.getPixels()
+  let seed = 7
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const o = y * st + x * n
+    const noise = Math.round(rnd() * 16 - 8)
+    const paper = 222 - Math.round(30 * x / W)        // darker toward the spine
+    for (let c = 0; c < 3; c++) {
+      const v = px[o + c]
+      px[o + c] = v > 200 ? Math.max(0, Math.min(255, paper + noise - (c === 2 ? 12 : 0))) : Math.min(255, v + 45)
+    }
+  }
+  const jpg = new Uint8Array(pm.asJPEG(80, false))
+  // the "photo": a dark gradient with nothing resembling paper
+  const photo = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 400, 400], false)
+  const pp = photo.getPixels(), pst = photo.getStride()
+  for (let y = 0; y < 400; y++) for (let x = 0; x < 400; x++) {
+    const o = y * pst + x * 3
+    pp[o] = 30 + (x >> 2); pp[o + 1] = 20 + (y >> 2); pp[o + 2] = 60
+  }
+  const photoJpg = new Uint8Array(photo.asJPEG(85, false))
+
+  const doc = await PDFDocument.create()
+  const f = await doc.embedFont(StandardFonts.Helvetica)
+  const p0 = doc.addPage([595, 842])
+  p0.drawImage(await doc.embedJpg(jpg), { x: 0, y: 0, width: 595, height: 842 })
+  p0.drawText('OCR-LAYER-TEXT', { x: 40, y: 20, size: 10, font: f })
+  const p1 = doc.addPage([595, 842])
+  p1.drawImage(await doc.embedJpg(photoJpg), { x: 100, y: 300, width: 400, height: 400 })
+  return new Uint8Array(await doc.save())
+})()
+
+await call('load', { bytes: scanFixture.slice().buffer })
+let sizeBefore = (await call('meta')).size
+const grayBefore = pageMean((await call('download')).bytes, 0)
+check('fixture really is gray paper', grayBefore.mean < 205 && grayBefore.white < 0.01,
+  `mean ${grayBefore.mean.toFixed(1)}, pure white ${(grayBefore.white * 100).toFixed(1)}%`)
+const photoBefore = pageMean((await call('download')).bytes, 1)
+
+let cl = await call('cleanScan', { indices: [0], strength: 'normal', gray: true })
+check('one page image whitened', cl.images === 1 && cl.pages === 1, JSON.stringify({ images: cl.images, pages: cl.pages, skipped: cl.skipped }))
+let cleaned = (await call('download')).bytes
+const grayAfter = pageMean(cleaned, 0)
+check('paper became pure white', grayAfter.white > 0.6 && grayAfter.mean > 225,
+  `mean ${grayAfter.mean.toFixed(1)}, pure white ${(grayAfter.white * 100).toFixed(1)}%`)
+check('the text layer survived', textOf(cleaned)[0].includes('OCR-LAYER-TEXT'))
+check('the unselected page was not touched', Math.abs(pageMean(cleaned, 1).mean - photoBefore.mean) < 0.5)
+check('the old image was garbage-collected, file got smaller', cl.sizeAfter < cl.sizeBefore,
+  `${cl.sizeBefore} -> ${cl.sizeAfter} bytes`)
+check('page geometry unchanged', cl.meta.pageCount === 2 && Math.round(cl.meta.pages[0].w) === 595 && Math.round(cl.meta.pages[0].h) === 842)
+check('whitening is undoable', (await call('undo')).size === sizeBefore &&
+  Math.abs(pageMean((await call('download')).bytes, 0).mean - grayBefore.mean) < 0.5)
+
+cl = await call('cleanScan', { strength: 'strong', gray: false })
+check('all pages: the photo is skipped, the scan is whitened', cl.images === 1 && cl.skipped === 1,
+  JSON.stringify({ images: cl.images, skipped: cl.skipped }))
+cleaned = (await call('download')).bytes
+check('photo left alone', Math.abs(pageMean(cleaned, 1).mean - photoBefore.mean) < 0.5)
+check('colour output also whitens', pageMean(cleaned, 0).white > 0.6)
+
+// A real-text PDF has no page image; the document must come back byte-identical.
+await call('load', { bytes: textFixture.slice().buffer })
+sizeBefore = (await call('meta')).size
+cl = await call('cleanScan', {})
+check('a text PDF reports nothing to do', cl.images === 0 && cl.skipped === 0)
+check('and is left byte-identical', (await call('meta')).size === sizeBefore)
+let undoable = true
+try { await call('undo') } catch (e) { undoable = false }
+check('no-op did not push an undo step', !undoable)
+
 console.log(`\n=========== ${pass} passed, ${fail} failed ===========`)
 process.exit(fail ? 1 : 0)

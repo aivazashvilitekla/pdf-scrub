@@ -8,7 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="google" content="notranslate">
 <title>PDF Scrub</title>
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css?v=4">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧼</text></svg>">
 </head>
 <body>
@@ -32,8 +32,9 @@
   <div id="dropzone" class="dropzone">
     <div class="dz-icon" aria-hidden="true">🧼</div>
     <h1>Drop a PDF here</h1>
-    <p>Strip a repeated watermark line, move part of a page somewhere else,
-       reorder or delete pages, and check the file for active content.</p>
+    <p>Strip a repeated watermark line, whiten the gray background of a scan so it
+       prints without wasting ink, move part of a page somewhere else, reorder or
+       delete pages, and check the file for active content.</p>
     <label class="btn primary" for="file-in">Choose a PDF</label>
     <p class="fineprint">Nothing is uploaded. The file never leaves this browser.</p>
   </div>
@@ -81,10 +82,42 @@
     <div id="grid" class="grid"></div>
   </section>
 
+  <!-- ----------------------------------------------------- scan clean-up -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>3. Clean up a scan</h2>
+      <span class="muted">for scanned books that print gray</span>
+    </div>
+    <p class="hint">
+      A scanned page is one big photo of the paper, so its "white" is really a light
+      gray that the printer dutifully covers in ink. This measures the paper colour on
+      each page image, turns it pure white, and darkens the print. The image is swapped
+      in place: page size, layout and any text layer stay exactly as they were.
+    </p>
+    <div class="row">
+      <label class="check">Strength
+        <select id="clean-strength">
+          <option value="light">Light</option>
+          <option value="normal" selected>Normal</option>
+          <option value="strong">Strong</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="clean-gray" checked> convert to grayscale</label>
+      <button class="btn primary" id="clean-all">Whiten all pages</button>
+      <button class="btn" id="clean-sel" disabled>Whiten selected pages</button>
+      <span id="clean-out" class="result"></span>
+    </div>
+    <p class="hint dim">
+      Photos and illustrations are left alone, as is any page that is real text rather
+      than an image. Strong clears heavy shading near the spine but can thin light
+      strokes. Undo and try another setting if the result looks wrong.
+    </p>
+  </section>
+
   <!-- ----------------------------------------------------- safety -->
   <section class="panel">
     <div class="panel-head">
-      <h2>3. Safety check</h2>
+      <h2>4. Safety check</h2>
       <span class="muted">for files downloaded from the internet</span>
     </div>
     <p class="hint">
@@ -180,6 +213,6 @@
   <a href="SOURCE.md">Source</a>.
 </footer>
 
-<script type="module" src="app.js?v=3"></script>
+<script type="module" src="app.js?v=4"></script>
 </body>
 </html>

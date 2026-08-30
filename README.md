@@ -14,6 +14,14 @@ occurrences exist and where, then *Strip*. Matching glyphs are deleted from the
 content stream, so the text stops being selectable, searchable and copyable. It is
 removed, not painted over.
 
+**Whiten a scan.** A scanned book page is one big photo of the paper, so its
+"white" is a light gray that a printer covers in ink. *Clean up a scan* measures
+the paper colour on each page image, stretches the levels so the paper becomes
+pure white and the print black, and swaps the image in place. Page size, layout
+and any OCR text layer are untouched; photos, stencil masks and small logos are
+left alone. Three strengths, optional conversion to grayscale, and the file
+usually gets smaller because a mostly-white image compresses far better.
+
 **View a page.** Click any thumbnail to open it large. Arrow keys page through,
 `+` / `-` / `0` or Ctrl-scroll zoom from 50% to 600% (100% fits the pane), and drag
 to pan once the page is bigger than the window.
@@ -82,7 +90,7 @@ blocked on `file://`.
 
     npm test
 
-59 assertions driving the real `worker.js` in Node against checked-in fixtures.
+73 assertions driving the real `worker.js` in Node against checked-in fixtures.
 No dependencies to install; it uses the libraries already in `vendor/`.
 
 Three of those groups exist because there is no browser in the loop:
@@ -127,7 +135,7 @@ function timeouts do not apply - file size is bounded only by the browser's memo
 
 | Concern | Library |
 | --- | --- |
-| Text search, true redaction, page rendering | MuPDF WASM |
+| Text search, true redaction, page rendering, image swap for scan clean-up | MuPDF WASM |
 | Reorder, delete, rotate, merge, split, region relocation | pdf-lib |
 
 Both run inside `worker.js`, off the main thread, so the UI stays responsive.
@@ -165,6 +173,9 @@ to reach people who already loaded the page.
   rotation back to 0, move, then rotate again.
 - **Scanned pages have no text layer.** If a PDF is page images with no embedded
   text, there is nothing for the search to match. Use *Redact an area* instead.
+- **Scan clean-up is a levels adjustment, not OCR or deskew.** It only touches
+  images at least 300x300 px that are mostly light; a page drawn as a gray vector
+  rectangle rather than an image is left as is.
 - **A phrase split across two lines may not match.** Add a shorter fragment such
   as `hispanoteca.ru` on its own line.
 - **The UI is marked `translate="no"`.** The page shows Russian and Spanish text, so

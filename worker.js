@@ -1,7 +1,8 @@
 // All PDF work happens here, off the main thread.
 //
 // Division of labour:
-//   MuPDF WASM (AGPL) - text search, true redaction, page rendering.
+//   MuPDF WASM (AGPL) - text search, true redaction, page rendering, and swapping
+//                       a scanned page's image for a whitened copy.
 //   pdf-lib (MIT)     - structural edits: reorder, delete, rotate, merge, split,
 //                       and lifting a region onto another page via a Form XObject.
 //
@@ -424,6 +425,182 @@ async function replaceLine ({ index, rect, x, y, size, text, family = 'sans', bo
   return meta()
 }
 
+// ---------------------------------------------------------------- scan clean-up
+//
+// A scanned book page is one big image whose "white" is really a light gray, with
+// the paper tint, scanner shading and noise on top. Printing it lays ink over the
+// whole page. This finds every page-sized image, estimates the paper colour from
+// the pixels, and stretches the levels so the paper goes to pure white and the
+// ink to black. The image is then swapped in place in the page's XObject
+// resources, so the page's content stream, geometry and any OCR text layer are
+// untouched. Nothing is rendered or re-rasterised.
+
+// How far below the estimated paper colour a pixel may sit and still count as
+// paper. Bigger clears more shading near the spine, at the cost of thinning
+// light strokes.
+const CLEAN_TOLERANCE = { light: 20, normal: 35, strong: 55 }
+
+// A whitened page is stored as 8-bit gray (or RGB) with Flate. Lossless, and it
+// compresses very well once most pixels are exactly 255. JPEG was rejected: its
+// ringing puts a light gray halo back around every glyph, which is the ink the
+// user was trying to save.
+function whitenPixmap (src, { tolerance, gray }) {
+  const w = src.getWidth(), h = src.getHeight()
+  const st = src.getStride(), n = src.getNumberOfComponents()
+  const alpha = src.getAlpha() ? 1 : 0
+  const nc = n - alpha                          // colour components, 1 or 3
+  const outGray = gray || nc === 1
+  // Allocate the output BEFORE taking any pixel view. getPixels() returns a view
+  // into wasm memory, and a large allocation can grow that memory, which detaches
+  // every earlier view and silently leaves it empty.
+  const out = new mupdf.Pixmap(outGray ? mupdf.ColorSpace.DeviceGray : mupdf.ColorSpace.DeviceRGB, [0, 0, w, h], false)
+  const px = src.getPixels()
+  const op = out.getPixels(), ost = out.getStride()
+  const lum = nc >= 3
+    ? (o) => (px[o] * 299 + px[o + 1] * 587 + px[o + 2] * 114) / 1000
+    : (o) => px[o]
+
+  // Paper estimate: the median of the bright population, sampled on a grid.
+  // The median beats the histogram mode when scanner shading spreads the
+  // paper across a wide range, and beats the mean because ink drags that down.
+  const hist = new Uint32Array(256)
+  let bright = 0, sampled = 0
+  const step = Math.max(1, Math.floor(Math.sqrt((w * h) / 250000)))
+  for (let y = 0; y < h; y += step) {
+    for (let x = 0; x < w; x += step) {
+      const l = lum(y * st + x * n) | 0
+      hist[l]++
+      sampled++
+      if (l >= 128) bright++
+    }
+  }
+  // A photo or a dark illustration is not paper. Levels would wreck it.
+  if (bright < sampled * 0.5) { try { out.destroy() } catch (e) {} return null }
+
+  let acc = 0, median = 255
+  for (let i = 128; i < 256; i++) { acc += hist[i]; if (acc >= bright / 2) { median = i; break } }
+  const white = Math.max(96, median - tolerance)
+  const black = Math.round(white * 0.3)
+  const lut = new Uint8Array(256)
+  for (let i = 0; i < 256; i++) {
+    lut[i] = i <= black ? 0 : i >= white ? 255 : Math.round(((i - black) * 255) / (white - black))
+  }
+
+  for (let y = 0; y < h; y++) {
+    let o = y * st, q = y * ost
+    for (let x = 0; x < w; x++, o += n) {
+      if (outGray) {
+        op[q++] = lut[lum(o) | 0]
+      } else {
+        op[q++] = lut[px[o]]; op[q++] = lut[px[o + 1]]; op[q++] = lut[px[o + 2]]
+      }
+    }
+  }
+  return { out, paper: median, white, black }
+}
+
+// Walk a resource dictionary's XObjects, recursing into Form XObjects, and hand
+// every image reference to `visit`. `seen` stops shared resources being walked twice.
+function eachImage (d, resources, visit, seen, depth = 0) {
+  if (!resources || resources.isNull() || depth > 4) return
+  let xobjs
+  try { xobjs = resources.get('XObject') } catch (e) { return }
+  if (!xobjs || xobjs.isNull() || !xobjs.isDictionary()) return
+  const entries = []
+  try { xobjs.forEach((val, key) => entries.push([String(key), val])) } catch (e) { return }
+  for (const [key, ref] of entries) {
+    let obj
+    try { obj = ref.resolve() } catch (e) { continue }
+    if (!obj || obj.isNull() || !obj.isDictionary()) continue
+    let sub = ''
+    try { sub = obj.get('Subtype').asName() } catch (e) {}
+    if (sub === 'Form') {
+      const id = ref.isIndirect() ? ref.asIndirect() : null
+      if (id !== null) { if (seen.has('f' + id)) continue; seen.add('f' + id) }
+      let inner = null
+      try { inner = obj.get('Resources') } catch (e) {}
+      eachImage(d, inner, visit, seen, depth + 1)
+    } else if (sub === 'Image') {
+      visit(xobjs, key, ref, obj)
+    }
+  }
+}
+
+function cleanScan ({ indices, strength = 'normal', gray = true }) {
+  const d = openPdf()
+  const tolerance = CLEAN_TOLERANCE[strength] || CLEAN_TOLERANCE.normal
+  const pageList = Array.isArray(indices) && indices.length
+    ? indices
+    : Array.from({ length: d.countPages() }, (_, i) => i)
+
+  const replaced = new Map()      // old object number -> new ref, for images shared across pages
+  const seen = new Set()
+  let images = 0, skipped = 0
+  const pagesTouched = new Set()
+
+  for (const idx of pageList) {
+    const page = d.loadPage(idx)
+    let resources = null
+    try { resources = page.getObject().getInheritable('Resources') } catch (e) {}
+    eachImage(d, resources, (dict, key, ref, obj) => {
+      const num = ref.isIndirect() ? ref.asIndirect() : null
+      if (num !== null && replaced.has(num)) {
+        dict.put(key, replaced.get(num))
+        pagesTouched.add(idx)
+        return
+      }
+      // Stencil masks are already pure black and white; soft-masked or
+      // colour-keyed images would lose their transparency if rebuilt.
+      const has = (k) => { try { const v = obj.get(k); return !!(v && !v.isNull()) } catch (e) { return false } }
+      let isMask = false
+      try { const m = obj.get('ImageMask'); isMask = !!(m && !m.isNull() && m.asBoolean()) } catch (e) {}
+      if (isMask || has('SMask') || has('Mask')) { skipped++; return }
+      let wpx = 0, hpx = 0
+      try { wpx = obj.get('Width').asNumber(); hpx = obj.get('Height').asNumber() } catch (e) {}
+      if (wpx * hpx < 90000) { skipped++; return }      // a logo, not a page
+
+      let img = null, pix = null, res = null
+      try {
+        img = d.loadImage(ref)
+        pix = img.toPixmap()
+        const cs = pix.getColorSpace()
+        const nc = pix.getNumberOfComponents() - (pix.getAlpha() ? 1 : 0)
+        // Anything that is not plain gray or RGB (CMYK, Indexed, ICC, Lab...) is
+        // converted first so the maths below sees 1 or 3 bytes per pixel.
+        const plain = cs && ((nc === 1 && cs.isGray()) || (nc === 3 && cs.isRGB()))
+        if (!plain || pix.getAlpha()) {
+          const conv = pix.convertToColorSpace(nc === 1 ? mupdf.ColorSpace.DeviceGray : mupdf.ColorSpace.DeviceRGB, false)
+          try { pix.destroy() } catch (e) {}
+          pix = conv
+        }
+        res = whitenPixmap(pix, { tolerance, gray })
+      } catch (e) {
+        res = null
+      }
+      if (!res) {
+        skipped++
+      } else {
+        const newImg = new mupdf.Image(res.out)
+        const newRef = d.addImage(newImg)
+        dict.put(key, newRef)
+        if (num !== null) replaced.set(num, newRef)
+        images++
+        pagesTouched.add(idx)
+        try { res.out.destroy() } catch (e) {}
+        try { newImg.destroy() } catch (e) {}
+      }
+      try { pix && pix.destroy() } catch (e) {}
+      try { img && img.destroy() } catch (e) {}
+    }, seen)
+    try { page.destroy() } catch (e) {}
+  }
+
+  const sizeBefore = bytes.length
+  // garbage=compact drops the old image streams nothing references any more.
+  if (images) commit(saveMupdf(d))
+  return { images, skipped, pages: pagesTouched.size, sizeBefore, sizeAfter: bytes.length, meta: meta() }
+}
+
 // ---------------------------------------------------------------- safety scan
 //
 // PDFs can carry JavaScript, auto-run actions, launch actions and embedded
@@ -588,6 +765,7 @@ const handlers = {
   sanitize,
   textLines,
   replaceLine,
+  cleanScan,
   download: () => ({ bytes: new Uint8Array(bytes) }),
   undo,
 }

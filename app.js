@@ -8,7 +8,7 @@ const $ = (id) => document.getElementById(id)
 
 // Version query in step with index.html: without it a stale worker.js can be
 // served from cache against a fresh app.js.
-const worker = new Worker('worker.js?v=3', { type: 'module' })
+const worker = new Worker('worker.js?v=4', { type: 'module' })
 const pending = new Map()
 let seq = 0
 
@@ -121,6 +121,7 @@ function syncSelection () {
   $('sel-none').disabled = n === 0
   $('rot-sel').disabled = n === 0
   $('export-sel').disabled = n === 0
+  $('clean-sel').disabled = n === 0
   $('del-sel').disabled = n === 0 || n === total
   $('sel-all').disabled = total > 0 && n === total
 }
@@ -615,6 +616,42 @@ $('do-move').addEventListener('click', async () => {
   })
   $('editor').hidden = true
   toast(`Moved to page ${ED.dst + 1}.`)
+})
+
+
+// ------------------------------------------------------------------ scan clean-up
+
+function fmtMB (n) { return (n / 1048576).toFixed(2) + ' MB' }
+
+async function cleanScan (indices) {
+  const out = $('clean-out')
+  const payload = { indices, strength: $('clean-strength').value, gray: $('clean-gray').checked }
+  try {
+    const res = await busy('Whitening the scan\u2026', () => call('cleanScan', payload))
+    if (!res.images) {
+      out.textContent = res.skipped
+        ? `Nothing changed: ${res.skipped} image${res.skipped === 1 ? '' : 's'} skipped as photos, masks or logos.`
+        : 'Nothing changed: no page images found. This PDF looks like real text, not a scan.'
+      out.className = 'result bad'
+      return
+    }
+    adopt(res.meta)
+    $('undo').disabled = false
+    out.textContent = `Whitened ${res.images} image${res.images === 1 ? '' : 's'} on ${res.pages} page${res.pages === 1 ? '' : 's'}` +
+      (res.skipped ? `, left ${res.skipped} alone` : '') +
+      ` \u00b7 ${fmtMB(res.sizeBefore)} \u2192 ${fmtMB(res.sizeAfter)}`
+    out.className = 'result good'
+    toast(`Whitened ${res.pages} page${res.pages === 1 ? '' : 's'}.`)
+  } catch (err) {
+    out.textContent = ''
+    toast(err.message, true)
+  }
+}
+
+$('clean-all').addEventListener('click', () => cleanScan(allIdx()))
+$('clean-sel').addEventListener('click', () => {
+  if (!S.sel.size) return toast('Select some pages first.', true)
+  cleanScan([...S.sel].sort((a, b) => a - b))
 })
 
 
