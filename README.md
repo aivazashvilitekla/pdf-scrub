@@ -22,6 +22,24 @@ and any OCR text layer are untouched; photos, stencil masks and small logos are
 left alone. Three strengths, optional conversion to grayscale, and the file
 usually gets smaller because a mostly-white image compresses far better.
 
+**Make a book from text.** *New from text* opens a box to paste into. Every line
+break starts a paragraph (or, in blank-line mode, blank lines do), `# ` starts a
+chapter on a fresh page, `## ` is a subheading and `***` a scene break. With
+*detect chapter titles* on, a line in CAPITALS, a roman numeral alone or
+*Part One* opens a chapter too, so a novel pasted from an ebook needs no markup.
+Chapters open centred a fifth of the way down the page, body pages carry the
+title as a running head, and the title page takes an optional subtitle. Choose A4 / A5 / Letter, serif
+or sans, the size, justification and page numbers; an optional title and author
+make a title page. The output is real, searchable text in the built-in fonts, so a
+whole novel is a few hundred kilobytes. Western European text only - see below.
+
+**Match an original.** With a PDF open, the book maker can *Use its text* (the
+text layer, rebuilt into paragraphs, hyphenation undone, page numbers dropped) and
+*Match its layout* (page size, margins, text size, leading, indent, justification
+and page numbers, measured from the text positions). Paste a corrected or
+different text and the new book comes out on the same page as the original. The
+typeface itself cannot be read from a scan, so serif or sans stays your choice.
+
 **View a page.** Click any thumbnail to open it large. Arrow keys page through,
 `+` / `-` / `0` or Ctrl-scroll zoom from 50% to 600% (100% fits the pane), and drag
 to pan once the page is bigger than the window.
@@ -90,7 +108,7 @@ blocked on `file://`.
 
     npm test
 
-73 assertions driving the real `worker.js` in Node against checked-in fixtures.
+96 assertions driving the real `worker.js` in Node against checked-in fixtures.
 No dependencies to install; it uses the libraries already in `vendor/`.
 
 Three of those groups exist because there is no browser in the loop:
@@ -136,7 +154,7 @@ function timeouts do not apply - file size is bounded only by the browser's memo
 | Concern | Library |
 | --- | --- |
 | Text search, true redaction, page rendering, image swap for scan clean-up | MuPDF WASM |
-| Reorder, delete, rotate, merge, split, region relocation | pdf-lib |
+| Reorder, delete, rotate, merge, split, region relocation, book layout | pdf-lib |
 
 Both run inside `worker.js`, off the main thread, so the UI stays responsive.
 `app.js` holds no PDF logic; it only manages state, coordinates and the DOM.
@@ -173,6 +191,10 @@ to reach people who already loaded the page.
   rotation back to 0, move, then rotate again.
 - **Scanned pages have no text layer.** If a PDF is page images with no embedded
   text, there is nothing for the search to match. Use *Redact an area* instead.
+- **The book maker uses the built-in WinAnsi fonts.** Spanish and other Western
+  European text is fine; Cyrillic and Greek are refused with the offending
+  characters listed, or replaced with `?` if you tick that option. There is no
+  hyphenation, and widows and orphans are not controlled.
 - **Scan clean-up is a levels adjustment, not OCR or deskew.** It only touches
   images at least 300x300 px that are mostly light; a page drawn as a gray vector
   rectangle rather than an image is left as is.

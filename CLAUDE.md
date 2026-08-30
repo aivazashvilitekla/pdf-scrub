@@ -1,8 +1,8 @@
 # pdf-scrub
 
 A browser-only PDF tool: strips a repeated watermark line, edits text line by line,
-whitens the gray paper of scanned pages, moves a region of one page onto another,
-does page operations, and scans for active content. Deployed to Vercel as a static site.
+whitens the gray paper of scanned pages, lays pasted text out as a book, moves a
+region of one page onto another, does page operations, and scans for active content. Deployed to Vercel as a static site.
 
 Live repo: `github.com/aivazashvilitekla/pdf-scrub`.
 
@@ -31,7 +31,7 @@ styles.css   all styling
 app.js       DOM, state, coordinates. NO PDF logic.
 worker.js    ALL PDF work, in a module worker, off the main thread.
 vendor/      pinned library copies, committed deliberately
-test/run.mjs 73 assertions, driven in Node with a fake worker scope
+test/run.mjs 96 assertions, driven in Node with a fake worker scope
 tools/       inspect.mjs, a CLI safety scanner for a file on disk
 ```
 
@@ -40,14 +40,14 @@ Everything crosses the boundary through `call(type, payload)` in `app.js` and th
 
 `load` `meta` `render` `scan` `strip` `redactRect` `moveRegion` `pageOps`
 `append` `extract` `inspect` `sanitize` `textLines` `replaceLine` `cleanScan`
-`download` `undo`
+`makeBook` `pageStyle` `extractText` `download` `undo`
 
 ### Division of labour, and why
 
 | Concern | Library | Why not the other one |
 | --- | --- | --- |
 | Text search, true redaction, rendering, object walking, image pixels in/out (`cleanScan`) | **MuPDF 1.28.0** (wasm) | pdf-lib cannot remove text, render, or decode an image's pixels |
-| Reorder, delete, rotate, merge, split, region embed, draw text | **pdf-lib 1.17.1** | MuPDF's JS bindings make these far more work |
+| Reorder, delete, rotate, merge, split, region embed, draw text, book layout (`makeBook`) | **pdf-lib 1.17.1** | MuPDF's JS bindings make these far more work |
 
 MuPDF is **AGPL-3.0-or-later**, which is why `LICENSE` and `SOURCE.md` exist and the
 footer links to them. Keep that honest if the deployment stays public.
@@ -139,8 +139,29 @@ compression.
 13. **`cleanScan` swaps the image XObject, it does not re-render the page.** That is
     what keeps the OCR text layer, the geometry and the content stream intact. It
     skips stencil masks, soft-masked images, anything under 300x300 px and any image
-    whose pixels are less than half light, so photos survive.
-14. **`aspect-ratio` only sets a preferred size.** `min-height: auto` lets intrinsic
+    whose pixels are less than half light, so photos survive. Scanned books are
+    usually **MRC**: a JPX/JPEG of the paper plus the text as a soft-masked image on
+    top, so the skipped soft-masked image IS the text.
+14. **Never call `ref.resolve()` on an XObject entry before a `garbage=compact` save.**
+    In MuPDF 1.28 holding the resolved wrapper of an image that carries `/SMask`
+    across that save writes the object WITHOUT its stream, which blanked every page
+    of a real scan in the browser while the synthetic tests stayed green. Read fields
+    through the reference (`ref.get('Subtype')`), which is safe, and open a fresh
+    document for the mutation. `cleanScan` also renders the first touched page
+    before and after and refuses to commit if the ink fraction collapsed. The test
+    suite pins the quirk so a MuPDF upgrade that fixes it shows up.
+15. **Content-stream order is reading order for extraction.** MuPDF's structured
+    text keeps the order things were drawn, so `makeBook` stamps the page number
+    when it finishes a page, not when it starts one. Drawn first, the folio headed
+    every page's extracted text and broke the "chapter starts a page" tests.
+16. **Justification uses the `Tw` operator**, not word-by-word placement: `makeBook`
+    wraps `drawText` in `pushGraphicsState / setWordSpacing / popGraphicsState`.
+    `Tw` only applies to byte 32 in simple fonts, which the WinAnsi built-ins are.
+17. **OCR glyph sizes wobble by about 20% line to line.** `pageStyle` takes the
+    median, and `extractText` only detects headings from size when the PDF has real
+    fonts (`family` is non-null). Detecting them on a scan produced 61 false chapter
+    breaks in a 72-page book and inflated it to 105 pages.
+18. **`aspect-ratio` only sets a preferred size.** `min-height: auto` lets intrinsic
     content win, which stretched the page thumbnails. They carry `min-height: 0`.
 
 ---

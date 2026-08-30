@@ -433,5 +433,190 @@ let undoable = true
 try { await call('undo') } catch (e) { undoable = false }
 check('no-op did not push an undo step', !undoable)
 
+// ---------------------------------------------------------------- book maker
+group('make a book from pasted text')
+const para = 'He pasado un puente estupendo. He estado con unos amigos en un pueblecito de la Sierra. ' +
+  'Ha hecho un tiempo maravilloso y lo he pasado muy bien. El único problema es que he comido muchísimo, demasiado. '
+const bookText = [
+  '# Lunes, 15 de octubre de 1989',
+  '',
+  para.repeat(3),
+  '–Lola, en la sala de espera hay un nuevo cliente.',
+  '–Ya puede pasar –le he dicho yo.',
+  '',
+  '***',
+  para.repeat(40),
+  '# Martes, 16 de octubre',
+  'Supercalifragilisticoexpialidoso'.repeat(6),   // wider than a line, must be split
+  '## Una nota',
+  para.repeat(2),
+].join('\n')
+
+let bk = await call('makeBook', { text: bookText, title: 'Lola Lago', author: 'Lourdes Miquel', size: 'a5', fontSize: 11 })
+let pages = textOf((await call('download')).bytes)
+check('several pages produced', bk.meta.pageCount >= 4, `${bk.meta.pageCount} pages`)
+check('A5 page size', Math.round(bk.meta.pages[0].w) === 420 && Math.round(bk.meta.pages[0].h) === 595)
+check('title page carries title and author', pages[0].includes('Lola Lago') && pages[0].includes('Lourdes Miquel'))
+check('title page has no page number', !/^\s*1\s*$/m.test(pages[0]))
+check('first chapter starts on its own page', pages[1].trim().startsWith('Lunes, 15 de octubre de 1989'))
+check('body text is real, searchable text', pages[1].includes('pueblecito de la Sierra'))
+check('accents survive', pages[1].includes('único') && pages[1].includes('muchísimo'))
+check('dialogue lines stay separate paragraphs', /\n–Lola, en la sala/.test(pages[1]) && /\n–Ya puede pasar/.test(pages[1]))
+check('scene break drawn', pages.some((t) => t.includes('*  *  *')))
+const martes = pages.findIndex((t) => t.trim().startsWith('Martes, 16 de octubre'))
+check('second chapter also starts a fresh page', martes > 1, `page ${martes + 1}`)
+check('an over-long word is split rather than lost', martes > 0 && pages[martes].includes('Supercalifragilistico'))
+check('subheading present', martes > 0 && pages[martes].includes('Una nota'))
+check('page numbers printed', /(^|\n)\s*3\s*($|\n)/.test(pages[2]), JSON.stringify(pages[2].trim().split('\n').pop()))
+check('word count reported', bk.words > 500 && bk.paragraphs >= 6, `${bk.words} words, ${bk.paragraphs} paragraphs`)
+check('the book is the working document', (await call('meta')).pageCount === bk.meta.pageCount)
+let noUndo = false
+try { await call('undo') } catch (e) { noUndo = true }
+check('undo stack starts empty', noUndo)
+
+// No title: the text starts on page 1 and page 1 is numbered.
+bk = await call('makeBook', { text: 'Una línea.\nOtra línea.', size: 'letter', justify: false, pageNumbers: true })
+pages = textOf((await call('download')).bytes)
+check('no title page when no title', bk.meta.pageCount === 1 && pages[0].includes('Una línea'))
+check('page 1 numbered without a title page', /(^|\n)\s*1\s*($|\n)/.test(pages[0]))
+
+// Blank-line paragraph mode joins hard-wrapped lines.
+bk = await call('makeBook', { text: 'primera parte de\nla misma frase\n\nsegundo párrafo', paragraphs: 'blank', justify: false })
+check('blank-line mode joins wrapped lines', bk.paragraphs === 2 && textOf((await call('download')).bytes)[0].includes('primera parte de la misma frase'))
+
+// Characters outside WinAnsi: refused with a list, or replaced on request.
+let bookRefused = false
+try { await call('makeBook', { text: 'Hola Книги мир' }) } catch (e) { bookRefused = /cannot be drawn/.test(e.message) && e.message.includes('"К"') }
+check('Cyrillic is refused with the offending characters listed', bookRefused)
+bk = await call('makeBook', { text: 'Hola Книги', unsupported: 'replace' })
+check('or replaced with ? on request', bk.substituted === 5 && textOf((await call('download')).bytes)[0].includes('Hola ?????'))
+bk = await call('makeBook', { text: 'a b‐c​d' })
+check('lookalike characters are substituted silently', bk.substituted === 3 && textOf((await call('download')).bytes)[0].includes('a b-cd'))
+try { await call('makeBook', { text: '   \n  ' }); check('empty text is refused', false) }
+catch (e) { check('empty text is refused', /Paste some text/.test(e.message)) }
+
+// ---------------------------------------------------------------- MRC scans and the MuPDF resolve() quirk
+//
+// Real scanned books are often "MRC": a JPEG of the paper underneath, and the
+// text as a separate soft-masked image on top. Whitening the paper layer must
+// leave the masked text layer alone. The first version of cleanScan erased it:
+// merely calling ref.resolve() on the soft-masked image made MuPDF write that
+// object without its stream on the next garbage=compact save. The fixture here
+// (pdf-lib PNG with alpha = image + /SMask) reproduces that quirk.
+group('MRC scan: whiten the paper, keep the masked text layer')
+const mrc = await (async () => {
+  const W = 400, H = 500
+  const fg = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, W, H], true)
+  const fp = fg.getPixels(), fst = fg.getStride()
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const o = y * fst + x * 4
+    const ink = (y % 40) < 12 && x > 40 && x < 360
+    fp[o] = 0; fp[o + 1] = 0; fp[o + 2] = 0; fp[o + 3] = ink ? 255 : 0
+  }
+  const bg = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, W, H], false)
+  bg.clear(215)                                         // gray paper, no text in it
+  const doc = await PDFDocument.create()
+  const pg = doc.addPage([300, 375])
+  pg.drawImage(await doc.embedJpg(new Uint8Array(bg.asJPEG(80, false))), { x: 0, y: 0, width: 300, height: 375 })
+  pg.drawImage(await doc.embedPng(new Uint8Array(fg.asPNG())), { x: 0, y: 0, width: 300, height: 375 })
+  return new Uint8Array(await doc.save())
+})()
+const layers = (bytes) => {
+  const d = mupdf.Document.openDocument(bytes, 'application/pdf').asPDF()
+  const xo = d.loadPage(0).getObject().getInheritable('Resources').get('XObject')
+  const out = []
+  xo.forEach((v, k) => out.push({ key: k, stream: v.isStream(), smask: !v.get('SMask').isNull() }))
+  return out
+}
+const ink = (bytes) => {
+  const pm = mupdf.Document.openDocument(bytes, 'application/pdf').loadPage(0).toPixmap(mupdf.Matrix.scale(1, 1), mupdf.ColorSpace.DeviceGray, false)
+  const q = pm.getPixels(), st = pm.getStride(); let dark = 0, white = 0, n = 0
+  for (let y = 0; y < pm.getHeight(); y++) for (let x = 0; x < pm.getWidth(); x++) { n++; const v = q[y * st + x]; if (v < 128) dark++; if (v === 255) white++ }
+  return { dark: dark / n, white: white / n }
+}
+check('fixture has a soft-masked text layer', layers(mrc).some((l) => l.smask && l.stream))
+
+// The quirk itself, so a future MuPDF upgrade that fixes it (or a code change
+// that reintroduces resolve()) is visible.
+const quirk = (() => {
+  const d = mupdf.Document.openDocument(mrc, 'application/pdf').asPDF()
+  const xo = d.loadPage(0).getObject().getInheritable('Resources').get('XObject')
+  xo.forEach((v) => v.resolve())
+  return layers(new Uint8Array(d.saveToBuffer('compress=yes,garbage=compact').asUint8Array()))
+})()
+check('MuPDF quirk still present: resolve() + compact save drops the masked stream',
+  quirk.some((l) => l.smask && !l.stream), JSON.stringify(quirk))
+
+await call('load', { bytes: mrc.slice().buffer })
+await call('render', { index: 0, scale: 0.5 })          // thumbnails are rendered before the user clicks
+const inkBefore = ink((await call('download')).bytes)
+cl = await call('cleanScan', {})
+const cleanedMrc = (await call('download')).bytes
+const inkAfter = ink(cleanedMrc)
+check('paper layer whitened, text layer skipped', cl.images === 1 && cl.skipped === 1, JSON.stringify({ images: cl.images, skipped: cl.skipped }))
+check('the masked text layer is still a stream', layers(cleanedMrc).every((l) => l.stream), JSON.stringify(layers(cleanedMrc)))
+check('paper became white', inkAfter.white > 0.5 && inkBefore.white < 0.01, `white ${(inkBefore.white * 100).toFixed(1)}% -> ${(inkAfter.white * 100).toFixed(1)}%`)
+check('the print survived', inkAfter.dark > inkBefore.dark * 0.9, `ink ${(inkBefore.dark * 100).toFixed(1)}% -> ${(inkAfter.dark * 100).toFixed(1)}%`)
+
+// ---------------------------------------------------------------- book maker: plain-text niceties
+group('book maker: automatic chapter detection and running head')
+const novel = ['Part One', '', 'I', '', 'Mother died today. Or, maybe, yesterday.', '', 'The Home is at Marengo.', '', 'II', '', 'On waking I understood.', '', 'THE END.'].join('\n')
+bk = await call('makeBook', { text: novel, title: 'The Stranger', author: 'Albert Camus', subtitle: 'a test', paragraphs: 'blank', autoHeadings: true })
+pages = textOf((await call('download')).bytes)
+check('Part, roman numerals and CAPS lines each open a page', bk.meta.pageCount === 5, `${bk.meta.pageCount} pages: ` + pages.map((t) => JSON.stringify(t.trim().split('\n')[0])).join(' '))
+check('subtitle on the title page', pages[0].includes('a test'))
+check('running head on body pages but not on chapter openers',
+  !pages[2].includes('The Stranger') && pages.slice(1).every((t) => t.split('The Stranger').length <= 2))
+bk = await call('makeBook', { text: novel, paragraphs: 'blank', autoHeadings: false, pageNumbers: false })
+check('detection can be turned off', bk.meta.pageCount === 1)
+const twoBlank = await call('makeBook', { text: 'uno\n\ndos\n\n\ntres', paragraphs: 'blank' })
+check('blank-line mode: one blank is a paragraph break, two add a gap', twoBlank.paragraphs === 3)
+
+// ---------------------------------------------------------------- match an original's layout
+//
+// makeBook with a known layout, then pageStyle() must read that layout back and
+// extractText() must return the same paragraphs. A real-fonts round trip; the
+// scanned-book case (OCR layer, GlyphLessFont) was checked by hand on a 72-page
+// scan, where the measured page, leading, indent and justification matched.
+group('read a layout back from a PDF')
+const known = { pageSize: [400, 620], margins: { left: 48, right: 40, top: 60, bottom: 66 }, leading: 16, indent: 22 }
+const prose = Array.from({ length: 14 }, (_, i) =>
+  `Párrafo ${i + 1}. ` + 'Una frase bastante larga que llena la línea y sigue hasta el margen derecho para que haya algo que medir. '.repeat(2 + (i % 3)))
+prose.push('–Un diálogo corto.')
+prose.push('–Otro diálogo, también corto.')
+prose.push('Y una última frase.')
+const knownText = prose.join('\n\n')
+bk = await call('makeBook', { text: knownText, title: 'Medida', paragraphs: 'blank', fontSize: 12, justify: true, pageNumbers: true, layout: known })
+check('custom page size honoured', Math.round(bk.meta.pages[0].w) === 400 && Math.round(bk.meta.pages[0].h) === 620)
+const measured = await call('pageStyle')
+check('page size read back', Math.abs(measured.pageSize[0] - 400) < 0.5 && Math.abs(measured.pageSize[1] - 620) < 0.5, JSON.stringify(measured.pageSize))
+check('font size read back', measured.fontSize === 12, `${measured.fontSize}`)
+check('leading read back', Math.abs(measured.leading - 16) <= 0.5, `${measured.leading}`)
+check('left and right margins within 3 pt', Math.abs(measured.margins.left - 48) <= 3 && Math.abs(measured.margins.right - 40) <= 3, JSON.stringify(measured.margins))
+check('indent read back', Math.abs(measured.indent - 22) <= 2, `${measured.indent}`)
+check('justification detected', measured.justify === true)
+check('page numbers detected', measured.pageNumbers === true)
+check('real fonts report a family', measured.family === 'serif', `${measured.family}`)
+
+const rt = await call('extractText')
+const gotParas = rt.text.split('\n\n').filter((p) => !/^#/.test(p))
+check('every paragraph comes back as one paragraph', gotParas.length === prose.length,
+  `${gotParas.length} vs ${prose.length}`)
+check('paragraph text intact after wrapping', gotParas[3] && gotParas[3].replace(/\s+/g, ' ') === prose[3].replace(/\s+/g, ' ').trim(),
+  gotParas[3] ? JSON.stringify(gotParas[3].slice(0, 60)) : 'missing')
+check('short dialogue lines stay separate', gotParas.includes('–Un diálogo corto.') && gotParas.includes('–Otro diálogo, también corto.'))
+// The title repeats as the running head on every page, so it is furniture and
+// must not come back as text.
+check('running heads are not returned as paragraphs', !rt.text.includes('Medida'))
+
+// The measured layout can be fed straight back in.
+bk = await call('makeBook', { text: rt.text, paragraphs: 'blank', fontSize: measured.fontSize, layout: measured, justify: measured.justify })
+check('rebuilt from the measurement, same page count', bk.meta.pageCount === bk.meta.pageCount && Math.round(bk.meta.pages[0].w) === 400)
+try { await call('makeBook', { text: 'x', layout: { pageSize: [100, 100], margins: { left: 60, right: 60 } } }); check('an impossible layout is refused', false) }
+catch (e) { check('an impossible layout is refused', /no room/.test(e.message)) }
+await call('load', { bytes: plain.slice().buffer })
+try { await call('pageStyle'); check('a PDF without text cannot be measured', false) }
+catch (e) { check('a PDF without text cannot be measured', /no text layer/.test(e.message)) }
+
 console.log(`\n=========== ${pass} passed, ${fail} failed ===========`)
 process.exit(fail ? 1 : 0)

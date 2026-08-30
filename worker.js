@@ -4,7 +4,8 @@
 //   MuPDF WASM (AGPL) - text search, true redaction, page rendering, and swapping
 //                       a scanned page's image for a whitened copy.
 //   pdf-lib (MIT)     - structural edits: reorder, delete, rotate, merge, split,
-//                       and lifting a region onto another page via a Form XObject.
+//                       lifting a region onto another page via a Form XObject, and
+//                       laying pasted text out as a book.
 //
 // Coordinate systems, the thing most likely to bite:
 //   MuPDF page space  - origin TOP-LEFT, y grows downward. All rects crossing the
@@ -13,7 +14,7 @@
 //                       moveRegion(), against the page's CropBox (which is what MuPDF renders).
 
 import * as mupdf from './vendor/mupdf/mupdf.js'
-import { PDFDocument, StandardFonts, degrees, rgb } from './vendor/pdf-lib.esm.min.js'
+import { PDFDocument, StandardFonts, degrees, rgb, setWordSpacing, pushGraphicsState, popGraphicsState } from './vendor/pdf-lib.esm.min.js'
 
 let bytes = null      // Uint8Array: the current document, single source of truth
 let doc = null        // cached MuPDF PDFDocument opened from `bytes`
@@ -501,6 +502,12 @@ function whitenPixmap (src, { tolerance, gray }) {
 
 // Walk a resource dictionary's XObjects, recursing into Form XObjects, and hand
 // every image reference to `visit`. `seen` stops shared resources being walked twice.
+//
+// Deliberately never calls ref.resolve(). Holding a resolved wrapper of an image
+// that carries an /SMask across a garbage=compact save made MuPDF 1.28 write that
+// object WITHOUT its stream, which silently erased the text layer of every MRC
+// scan (background JPX + soft-masked foreground). Reading fields through the
+// indirect reference itself (ref.get('Subtype')) is safe. See the regression test.
 function eachImage (d, resources, visit, seen, depth = 0) {
   if (!resources || resources.isNull() || depth > 4) return
   let xobjs
@@ -509,25 +516,48 @@ function eachImage (d, resources, visit, seen, depth = 0) {
   const entries = []
   try { xobjs.forEach((val, key) => entries.push([String(key), val])) } catch (e) { return }
   for (const [key, ref] of entries) {
-    let obj
-    try { obj = ref.resolve() } catch (e) { continue }
-    if (!obj || obj.isNull() || !obj.isDictionary()) continue
+    if (!ref || ref.isNull()) continue
     let sub = ''
-    try { sub = obj.get('Subtype').asName() } catch (e) {}
+    try { sub = ref.get('Subtype').asName() } catch (e) {}
     if (sub === 'Form') {
       const id = ref.isIndirect() ? ref.asIndirect() : null
       if (id !== null) { if (seen.has('f' + id)) continue; seen.add('f' + id) }
       let inner = null
-      try { inner = obj.get('Resources') } catch (e) {}
+      try { inner = ref.get('Resources') } catch (e) {}
       eachImage(d, inner, visit, seen, depth + 1)
     } else if (sub === 'Image') {
-      visit(xobjs, key, ref, obj)
+      visit(xobjs, key, ref)
     }
   }
 }
 
+// Fraction of "ink" on a page: pixels well below the paper tone, where the paper
+// tone is the page's median luminance. Relative to the median so that gray paper
+// before and white paper after are compared on equal terms. Used to prove a
+// clean-up kept the print before the result is committed.
+function inkFraction (pdfBytes, index) {
+  const d = mupdf.Document.openDocument(pdfBytes, 'application/pdf')
+  const page = d.loadPage(index)
+  const pix = page.toPixmap(mupdf.Matrix.scale(0.6, 0.6), mupdf.ColorSpace.DeviceGray, false)
+  const px = pix.getPixels(), st = pix.getStride(), w = pix.getWidth(), h = pix.getHeight()
+  const hist = new Uint32Array(256)
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) hist[px[y * st + x]]++
+  let acc = 0, median = 255
+  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= (w * h) / 2) { median = i; break } }
+  const cut = Math.max(64, median - 60)
+  let dark = 0
+  for (let i = 0; i < cut; i++) dark += hist[i]
+  const f = dark / Math.max(1, w * h)
+  try { pix.destroy() } catch (e) {}
+  try { page.destroy() } catch (e) {}
+  try { d.destroy() } catch (e) {}
+  return f
+}
+
 function cleanScan ({ indices, strength = 'normal', gray = true }) {
-  const d = openPdf()
+  // A fresh document rather than the render-cached one: nothing else has touched
+  // its objects, so no stale wrapper can interfere with the save (see eachImage).
+  const d = mupdf.Document.openDocument(bytes, 'application/pdf').asPDF()
   const tolerance = CLEAN_TOLERANCE[strength] || CLEAN_TOLERANCE.normal
   const pageList = Array.isArray(indices) && indices.length
     ? indices
@@ -542,7 +572,7 @@ function cleanScan ({ indices, strength = 'normal', gray = true }) {
     const page = d.loadPage(idx)
     let resources = null
     try { resources = page.getObject().getInheritable('Resources') } catch (e) {}
-    eachImage(d, resources, (dict, key, ref, obj) => {
+    eachImage(d, resources, (dict, key, ref) => {
       const num = ref.isIndirect() ? ref.asIndirect() : null
       if (num !== null && replaced.has(num)) {
         dict.put(key, replaced.get(num))
@@ -550,13 +580,14 @@ function cleanScan ({ indices, strength = 'normal', gray = true }) {
         return
       }
       // Stencil masks are already pure black and white; soft-masked or
-      // colour-keyed images would lose their transparency if rebuilt.
-      const has = (k) => { try { const v = obj.get(k); return !!(v && !v.isNull()) } catch (e) { return false } }
+      // colour-keyed images would lose their transparency if rebuilt. In an MRC
+      // scan the soft-masked image IS the text, so this skip is what keeps it.
+      const has = (k) => { try { const v = ref.get(k); return !!(v && !v.isNull()) } catch (e) { return false } }
       let isMask = false
-      try { const m = obj.get('ImageMask'); isMask = !!(m && !m.isNull() && m.asBoolean()) } catch (e) {}
+      try { const m = ref.get('ImageMask'); isMask = !!(m && !m.isNull() && m.asBoolean()) } catch (e) {}
       if (isMask || has('SMask') || has('Mask')) { skipped++; return }
       let wpx = 0, hpx = 0
-      try { wpx = obj.get('Width').asNumber(); hpx = obj.get('Height').asNumber() } catch (e) {}
+      try { wpx = ref.get('Width').asNumber(); hpx = ref.get('Height').asNumber() } catch (e) {}
       if (wpx * hpx < 90000) { skipped++; return }      // a logo, not a page
 
       let img = null, pix = null, res = null
@@ -596,9 +627,546 @@ function cleanScan ({ indices, strength = 'normal', gray = true }) {
   }
 
   const sizeBefore = bytes.length
-  // garbage=compact drops the old image streams nothing references any more.
-  if (images) commit(saveMupdf(d))
+  if (images) {
+    const next = saveMupdf(d)
+    try { d.destroy() } catch (e) {}
+    // Validate before committing: whitening must keep the print. If the first
+    // touched page lost most of its ink, something other than paper was
+    // erased, and the user keeps the original rather than a blank book.
+    const first = Math.min(...pagesTouched)
+    const before = inkFraction(bytes, first)
+    const after = inkFraction(next, first)
+    if (before > 0.001 && after < before * 0.3) {
+      throw new Error(
+        `Whitening would have erased the print on page ${first + 1} ` +
+        `(ink ${(before * 100).toFixed(1)}% before, ${(after * 100).toFixed(1)}% after), so nothing was changed.`)
+    }
+    commit(next)
+  } else {
+    try { d.destroy() } catch (e) {}
+  }
   return { images, skipped, pages: pagesTouched.size, sizeBefore, sizeAfter: bytes.length, meta: meta() }
+}
+
+// ---------------------------------------------------------------- make a book
+//
+// Lays pasted text out as a printable book with pdf-lib: title page, chapter
+// headings on fresh pages, indented paragraphs, optional justification and page
+// numbers. Everything is real text in the built-in WinAnsi fonts, so the result
+// is searchable and tiny. See replaceLine() for the character-set caveat.
+
+const PAGE_SIZES = {
+  a4:     [595.28, 841.89],
+  a5:     [419.53, 595.28],
+  letter: [612, 792],
+}
+
+// Characters WinAnsi lacks but that have an obvious stand-in. Anything else that
+// fails to encode is either refused or replaced with "?", the caller's choice.
+const FALLBACK = {
+  '\u00a0': ' ', '\u2000': ' ', '\u2001': ' ', '\u2002': ' ', '\u2003': ' ', '\u2004': ' ',
+  '\u2005': ' ', '\u2006': ' ', '\u2007': ' ', '\u2008': ' ', '\u2009': ' ', '\u200a': ' ',
+  '\u202f': ' ', '\u205f': ' ', '\u3000': ' ',
+  '\u200b': '', '\u200c': '', '\u200d': '', '\u2060': '', '\ufeff': '', '\u00ad': '',
+  '\u2010': '-', '\u2011': '-', '\u2012': '-', '\u2212': '-', '\u2015': '\u2014',
+  '\u2032': "'", '\u2035': "'", '\u02bc': "'", '\u2033': '"', '\u2036': '"',
+  '\u201a': ',', '\u201e': '"', '\u2016': '|', '\u2044': '/',
+}
+
+// Lines that are obviously headings in pasted plain text, when autoHeadings is on:
+// a line entirely in capitals ("THE FIRST NOTEBOOK", "EPILOGUE"), a roman numeral
+// on its own ("I", "IV"), or "Part One" / "Chapter 3" / "Book II".
+const ROMAN = /^(?=[IVXLC])M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})\.?$/
+const NUMWORD = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|(?:twenty|thirty|forty|fifty)(?:-(?:one|two|three|four|five|six|seven|eight|nine))?|primera|segunda|tercera|cuarta|quinta|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)'
+const PART = new RegExp('^(part|book|chapter|capítulo|parte|libro)\\s+([ivxlc]+|\\d+|' + NUMWORD + ')\\b[^.]*$', 'i')
+function looksLikeHeading (line) {
+  if (line.length > 70) return false
+  if (ROMAN.test(line)) return true
+  if (PART.test(line)) return true
+  const letters = line.replace(/[^\p{L}]/gu, '')
+  return letters.length >= 3 && letters === letters.toUpperCase() && letters !== letters.toLowerCase()
+}
+
+// Turn the pasted text into a list of blocks the layout pass can consume.
+//   mode 'lines': every line break starts a paragraph; a blank line adds a gap.
+//   mode 'blank': paragraphs are separated by blank lines; single breaks are
+//                 joined; two or more blank lines in a row add a gap.
+// Lines starting with "# " / "## " are headings; "***", "* * *" or "---" alone on a
+// line is a scene break. With autoHeadings, looksLikeHeading() lines are "# ".
+function parseBook (text, mode, autoHeadings = false) {
+  const lines = text.replace(/\r\n?/g, '\n').replace(/\t/g, ' ').split('\n').map((l) => l.replace(/\s+$/, ''))
+  const blocks = []
+  let gap = false
+  let blanks = 0
+  let buffer = []
+  const flush = () => {
+    if (buffer.length) {
+      blocks.push({ kind: 'para', text: buffer.join(' ').replace(/ {2,}/g, ' ').trim(), gap })
+      gap = false
+    }
+    buffer = []
+  }
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line) {
+      flush()
+      blanks++
+      // In blank-line mode one blank line is just the paragraph separator; it
+      // takes a second to ask for visible space. In line mode any blank does.
+      if (blocks.length && (mode !== 'blank' || blanks >= 2)) gap = true
+      continue
+    }
+    blanks = 0
+    let m
+    if ((m = line.match(/^(#{1,2})\s+(.+)$/))) {
+      flush()
+      blocks.push({ kind: m[1].length === 1 ? 'h1' : 'h2', text: m[2].replace(/\s+#+$/, '') })
+      gap = false
+      continue
+    }
+    if (/^(\*\s*){3,}$|^-{3,}$|^_{3,}$/.test(line)) { flush(); blocks.push({ kind: 'break' }); gap = false; continue }
+    if (autoHeadings && looksLikeHeading(line)) { flush(); blocks.push({ kind: 'h1', text: line }); gap = false; continue }
+    if (mode === 'blank') buffer.push(line)
+    else { buffer = [line]; flush() }
+  }
+  flush()
+  return blocks
+}
+
+// layout (optional, from pageStyle()): { pageSize: [w, h], margins: { left, right,
+// top, bottom }, leading, indent }. Anything present overrides the defaults.
+async function makeBook ({ text, title = '', author = '', subtitle = '', size = 'a4', font = 'serif', fontSize = 11,
+                           justify = true, pageNumbers = true, paragraphs = 'lines', unsupported = 'reject',
+                           autoHeadings = false, runningHead = true, layout = null }) {
+  const src = String(text == null ? '' : text)
+  if (!src.trim()) throw new Error('Paste some text first.')
+  const L = layout || {}
+  const LM = L.margins || {}
+  const num = (v, fallback) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : fallback)
+  const [pw, ph] = Array.isArray(L.pageSize) && L.pageSize.length === 2
+    ? [num(L.pageSize[0], 595.28), num(L.pageSize[1], 841.89)]
+    : (PAGE_SIZES[size] || PAGE_SIZES.a4)
+  const body = Math.max(7, Math.min(24, Number(fontSize) || 11))
+  const faces = STD[font] || STD.serif
+
+  const doc = await PDFDocument.create()
+  const regular = await doc.embedFont(StandardFonts[faces[0]])
+  const bold = await doc.embedFont(StandardFonts[faces[1]])
+  const italic = await doc.embedFont(StandardFonts[faces[2]])
+
+  // Character check BEFORE any layout, so a refusal costs nothing and the message
+  // can list exactly what the built-in fonts cannot draw.
+  let substituted = 0
+  const bad = new Map()
+  const ok = new Set()
+  const clean = (str) => {
+    let out = ''
+    for (const ch of str) {
+      if (ch in FALLBACK) { out += FALLBACK[ch]; substituted++; continue }
+      const code = ch.codePointAt(0)
+      if (code < 0x80 || ok.has(ch)) { out += ch; continue }
+      if (bad.has(ch)) { bad.set(ch, bad.get(ch) + 1); out += '?'; continue }
+      try { regular.widthOfTextAtSize(ch, 10); ok.add(ch); out += ch }
+      catch (e) { bad.set(ch, 1); out += '?' }
+    }
+    return out
+  }
+  const blocks = parseBook(src, paragraphs, autoHeadings).map((b) => b.text == null ? b : { ...b, text: clean(b.text) })
+  const cleanTitle = clean(title.trim()), cleanAuthor = clean(author.trim()), cleanSubtitle = clean(subtitle.trim())
+  if (bad.size && unsupported !== 'replace') {
+    const total = [...bad.values()].reduce((a, b) => a + b, 0)
+    const list = [...bad.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)
+      .map(([ch, n]) => `${JSON.stringify(ch)}×${n}`).join(' ')
+    throw new Error(
+      `The built-in fonts cover Western European text only. ${total} character${total === 1 ? '' : 's'} ` +
+      `cannot be drawn: ${list}${bad.size > 12 ? ' …' : ''}. Fix the text, or tick "replace unsupported characters".`)
+  }
+  substituted += [...bad.values()].reduce((a, b) => a + b, 0)
+
+  // Geometry. Margins scale with the page so A5 does not end up all margin,
+  // unless a measured layout says otherwise.
+  const margin = Math.round(pw * 0.11)
+  const mL = num(LM.left, margin), mR = num(LM.right, margin)
+  const mT = num(LM.top, Math.round(margin * 1.0)), mB = num(LM.bottom, Math.round(margin * 1.15))
+  const top = ph - mT
+  const bottom = mB
+  const headY = ph - Math.round(mT * 0.55)   // running head baseline
+  const headRoom = mT >= body * 2.2           // a tight top margin has no room for one
+  const width = pw - mL - mR
+  if (width < body * 8 || top - bottom < body * 6) throw new Error('That layout leaves no room for text.')
+  const lead = num(L.leading, body * 1.38)
+  const indent = LM && Number.isFinite(Number(L.indent)) ? Math.max(0, Number(L.indent)) : body * 1.6
+  const H1 = body * 1.8, H2 = body * 1.3
+
+  const widthCache = new Map()
+  const measure = (f, s, w) => {
+    const k = f === bold ? 'b' + s + w : f === italic ? 'i' + s + w : 'r' + s + w
+    let v = widthCache.get(k)
+    if (v === undefined) { v = f.widthOfTextAtSize(w, s); widthCache.set(k, v) }
+    return v
+  }
+
+  // Break one paragraph into lines. Returns [{ words, width, last }].
+  function wrap (str, f, s, firstIndent) {
+    const spaceW = measure(f, s, ' ')
+    const words = str.split(' ').filter(Boolean)
+    const out = []
+    let cur = [], curW = 0, avail = width - firstIndent
+    const push = (last) => { out.push({ words: cur, width: curW, last, indent: out.length ? 0 : firstIndent }); cur = []; curW = 0; avail = width }
+    for (let w of words) {
+      let ww = measure(f, s, w)
+      // A single word wider than the line is split by characters.
+      while (ww > avail && w.length > 1) {
+        let cut = w.length - 1
+        while (cut > 1 && measure(f, s, w.slice(0, cut)) > avail - (cur.length ? spaceW + curW : 0)) cut--
+        if (cur.length) push(false)
+        cur = [w.slice(0, cut)]; curW = measure(f, s, cur[0]); push(false)
+        w = w.slice(cut); ww = measure(f, s, w)
+      }
+      const need = cur.length ? curW + spaceW + ww : ww
+      if (need > avail && cur.length) push(false)
+      curW = cur.length ? curW + spaceW + ww : ww
+      cur.push(w)
+    }
+    if (cur.length) push(true)
+    return out
+  }
+
+  let page = null, y = 0, pageIndex = 0
+  const words = src.split(/\s+/).filter(Boolean).length
+  const numberSize = body * 0.85
+
+  // The number is stamped when the page is finished, not when it is started, so
+  // it comes last in the content stream: text extraction and screen readers then
+  // read the body before the folio instead of starting every page with a digit.
+  let opener = false           // this page starts a chapter: no running head
+  function stampNumber () {
+    if (!page || (cleanTitle && pageIndex === 1)) return
+    if (pageNumbers) {
+      const label = String(pageIndex)
+      page.drawText(label, { x: (pw - measure(regular, numberSize, label)) / 2, y: bottom * 0.45, size: numberSize, font: regular })
+    }
+    if (runningHead && headRoom && cleanTitle && !opener) {
+      const headSize = body * 0.8
+      const lbl = cleanTitle.length > 60 ? cleanTitle.slice(0, 57) + '...' : cleanTitle
+      page.drawText(lbl, { x: (pw - measure(italic, headSize, lbl)) / 2, y: headY, size: headSize, font: italic, color: rgb(0.35, 0.35, 0.35) })
+    }
+  }
+  function newPage (isOpener = false) {
+    stampNumber()
+    page = doc.addPage([pw, ph])
+    pageIndex++
+    y = top
+    opener = isOpener
+  }
+  const ensure = (needed) => { if (!page || y - needed < bottom) newPage() }
+
+  function drawLine (ln, f, s, justified) {
+    const x = mL + ln.indent
+    const str = ln.words.join(' ')
+    const gaps = ln.words.length - 1
+    if (justified && !ln.last && gaps > 0) {
+      const extra = (width - ln.indent - ln.width) / gaps
+      // Tw is text state: set it around drawText's own BT/ET so every space on
+      // this line stretches, then restore.
+      page.pushOperators(pushGraphicsState(), setWordSpacing(extra))
+      page.drawText(str, { x, y, size: s, font: f })
+      page.pushOperators(popGraphicsState())
+    } else {
+      page.drawText(str, { x, y, size: s, font: f })
+    }
+  }
+
+  // Title page.
+  if (cleanTitle) {
+    newPage()
+    const tSize = body * 2.4
+    let ty = ph * 0.6
+    for (const ln of wrap(cleanTitle, bold, tSize, 0)) {
+      page.drawText(ln.words.join(' '), { x: (pw - ln.width) / 2, y: ty, size: tSize, font: bold })
+      ty -= tSize * 1.2
+    }
+    if (cleanAuthor) {
+      ty -= body * 1.5
+      for (const ln of wrap(cleanAuthor, italic, body * 1.25, 0)) {
+        page.drawText(ln.words.join(' '), { x: (pw - ln.width) / 2, y: ty, size: body * 1.25, font: italic })
+        ty -= body * 1.6
+      }
+    }
+    if (cleanSubtitle) {
+      ty -= body * 0.6
+      for (const ln of wrap(cleanSubtitle, regular, body * 0.95, 0)) {
+        page.drawText(ln.words.join(' '), { x: (pw - ln.width) / 2, y: ty, size: body * 0.95, font: regular, color: rgb(0.35, 0.35, 0.35) })
+        ty -= body * 1.3
+      }
+    }
+    page = null   // the body starts on a fresh page (title page carries no number)
+  }
+
+  let afterHeading = true
+  for (const b of blocks) {
+    if (b.kind === 'h1') {
+      // A chapter opens on a fresh page with the title centred a fifth of the
+      // way down, the way a printed novel does it, then the text follows.
+      newPage(true)
+      y = top - ph * 0.12
+      for (const ln of wrap(b.text, bold, H1, 0)) {
+        page.drawText(ln.words.join(' '), { x: (pw - ln.width) / 2, y, size: H1, font: bold })
+        y -= H1 * 1.25
+      }
+      y -= lead * 1.6
+      afterHeading = true
+    } else if (b.kind === 'h2') {
+      ensure(H2 * 3 + lead * 2)      // never strand a subheading at the foot of a page
+      // y sits at the top of the next line box, so step down a full heading
+      // height before drawing the baseline, or it lands on the paragraph above.
+      y -= lead * 0.7 + H2
+      for (const ln of wrap(b.text, bold, H2, 0)) { drawLine(ln, bold, H2, false); y -= H2 * 1.3 }
+      afterHeading = true
+    } else if (b.kind === 'break') {
+      ensure(lead * 3)
+      y -= lead * 0.6 + body            // same reason as the subheading above
+      const mark = '*  *  *'
+      page.drawText(mark, { x: (pw - measure(regular, body, mark)) / 2, y, size: body, font: regular })
+      y -= lead * 1.2
+      afterHeading = true
+    } else {
+      if (!b.text) continue
+      if (b.gap && !afterHeading) { ensure(lead); y -= lead * 0.5 }
+      const lines = wrap(b.text, regular, body, afterHeading ? 0 : indent)
+      for (const ln of lines) {
+        ensure(lead)
+        y -= body
+        drawLine(ln, regular, body, justify)
+        y -= lead - body
+      }
+      afterHeading = false
+    }
+  }
+  if (!page) newPage()
+  stampNumber()
+
+  doc.setProducer('PDF Scrub')
+  doc.setCreator('PDF Scrub')
+  if (cleanTitle) doc.setTitle(cleanTitle)
+  if (cleanAuthor) doc.setAuthor(cleanAuthor)
+
+  undoStack.length = 0
+  commit(new Uint8Array(await doc.save()), { snapshot: false })
+  return { meta: meta(), words, paragraphs: blocks.filter((b) => b.kind === 'para').length, substituted }
+}
+
+// ---------------------------------------------------------------- reading a layout back
+//
+// A scanned book with an OCR text layer, or any real-text PDF, describes its own
+// typography: where the lines sit gives the margins, the baseline spacing gives
+// the leading, the glyph size gives the body size, the first-line offset gives
+// the indent. pageStyle() measures those so makeBook() can reproduce the page.
+// The typeface itself cannot be read from a scan (OCR layers use an invisible
+// GlyphLessFont), so `family` is reported only when the PDF carries real fonts.
+
+const median = (arr) => {
+  if (!arr.length) return null
+  const a = [...arr].sort((x, y) => x - y)
+  return a[a.length >> 1]
+}
+const modeOf = (arr, step = 1) => {
+  if (!arr.length) return null
+  const counts = new Map()
+  for (const v of arr) { const k = Math.round(v / step) * step; counts.set(k, (counts.get(k) || 0) + 1) }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]
+}
+
+// Lines of one page, with fragments on the same baseline merged left to right.
+function pageLines (page) {
+  const st = page.toStructuredText()
+  const raw = []
+  let cur = null
+  st.walk({
+    beginLine (bbox) { cur = { bbox: [...bbox], text: '', chars: 0 } },
+    onChar (c, origin, font, size) {
+      if (!cur) return
+      if (!cur.chars) {
+        cur.x = origin[0]; cur.y = origin[1]; cur.size = size
+        try { cur.name = font.getName(); cur.serif = font.isSerif(); cur.mono = font.isMono() } catch (e) {}
+      }
+      cur.text += c
+      cur.chars++
+    },
+    endLine () { if (cur && cur.text.trim()) raw.push(cur); cur = null },
+  })
+  try { st.destroy() } catch (e) {}
+  raw.sort((a, b) => (Math.abs(a.y - b.y) < 2 ? a.bbox[0] - b.bbox[0] : a.y - b.y))
+  const lines = []
+  for (const ln of raw) {
+    const prev = lines[lines.length - 1]
+    if (prev && Math.abs(prev.y - ln.y) < 2 && ln.bbox[0] >= prev.bbox[2] - 2) {
+      prev.text = prev.text.replace(/\s+$/, '') + ' ' + ln.text.replace(/^\s+/, '')
+      prev.bbox[2] = Math.max(prev.bbox[2], ln.bbox[2])
+      prev.bbox[1] = Math.min(prev.bbox[1], ln.bbox[1]); prev.bbox[3] = Math.max(prev.bbox[3], ln.bbox[3])
+      prev.chars += ln.chars
+    } else {
+      lines.push(ln)
+    }
+  }
+  return lines
+}
+
+const isFolio = (ln) => /^\s*[\divxlc]{1,4}\s*$/i.test(ln.text)
+
+// Running heads repeat verbatim on page after page, at the very top or bottom.
+// Both conditions matter: a body line such as "\u2014S\u00ed." also recurs on many
+// pages, and dropping it would tear a hole in the text. Returns a Set of the
+// texts to ignore.
+function runningHeads (d, indices) {
+  const seenOn = new Map()
+  for (const idx of indices) {
+    const page = d.loadPage(idx)
+    const b = page.getBounds()
+    const ph = b[3] - b[1]
+    const lines = pageLines(page)
+    try { page.destroy() } catch (e) {}
+    const edge = new Set()
+    for (const ln of lines) {
+      const t = ln.text.trim()
+      if (!t || t.length >= 80 || isFolio(ln)) continue
+      if (ln.y < b[1] + ph * 0.12 || ln.y > b[3] - ph * 0.12) edge.add(t)
+    }
+    for (const t of edge) seenOn.set(t, (seenOn.get(t) || 0) + 1)
+  }
+  const heads = new Set()
+  for (const [t, n] of seenOn) if (n >= 3 && n >= indices.length * 0.3) heads.add(t)
+  return heads
+}
+const isFurniture = (ln, heads) => isFolio(ln) || heads.has(ln.text.trim())
+
+function samplePages (total) {
+  // skip front matter and the last leaves; sample up to 12 pages spread evenly
+  const lo = Math.min(total - 1, total > 8 ? 3 : 0), hi = total > 8 ? total - 2 : total - 1
+  const n = Math.min(12, hi - lo + 1)
+  const out = []
+  for (let i = 0; i < n; i++) out.push(Math.round(lo + (i * (hi - lo)) / Math.max(1, n - 1)))
+  return [...new Set(out)]
+}
+
+function pageStyle () {
+  const d = openPdf()
+  const total = d.countPages()
+  const widths = [], heights = [], sizes = [], leads = [], lefts = [], rights = [], tops = [], bottoms = [], indents = []
+  let justifiedLines = 0, fullLines = 0, folios = 0, serifVotes = 0, sansVotes = 0, monoVotes = 0, realFont = false
+  let pagesRead = 0
+  const sample = samplePages(total)
+  const heads = runningHeads(d, sample)
+  for (const idx of sample) {
+    const page = d.loadPage(idx)
+    const b = page.getBounds()
+    const pw = b[2] - b[0], ph = b[3] - b[1]
+    const lines = pageLines(page).filter((ln) => {
+      if (isFolio(ln)) { folios++; return false }
+      return !heads.has(ln.text.trim())
+    })
+    try { page.destroy() } catch (e) {}
+    if (lines.length < 4) continue
+    pagesRead++
+    widths.push(pw); heights.push(ph)
+    for (const ln of lines) {
+      for (let i = 0; i < Math.min(ln.chars, 200); i++) sizes.push(ln.size)
+      if (ln.name && !/glyphless|invisible/i.test(ln.name)) { realFont = true; if (ln.mono) monoVotes++; else if (ln.serif) serifVotes++; else sansVotes++ }
+    }
+    const body = median(sizes) || 10
+    const bodyLines = lines.filter((ln) => Math.abs(ln.size - body) < body * 0.35)
+    if (bodyLines.length < 3) continue
+    // Left edge: the most common start x among body lines. Right edge: the most
+    // common end x among long lines.
+    const left = modeOf(bodyLines.map((ln) => ln.bbox[0]), 2)
+    const longLines = bodyLines.filter((ln) => ln.bbox[2] - ln.bbox[0] > pw * 0.45)
+    const right = longLines.length ? modeOf(longLines.map((ln) => ln.bbox[2]), 2) : null
+    lefts.push(left)
+    if (right) rights.push(pw - right)
+    tops.push(Math.min(...lines.map((ln) => ln.bbox[1])))
+    bottoms.push(ph - Math.max(...bodyLines.map((ln) => ln.y)))
+    for (let i = 1; i < bodyLines.length; i++) {
+      const dy = bodyLines[i].y - bodyLines[i - 1].y
+      if (dy > body * 0.9 && dy < body * 2.2) leads.push(dy)
+    }
+    for (const ln of bodyLines) {
+      const off = ln.bbox[0] - left
+      if (off > body * 0.4 && off < body * 5) indents.push(off)
+      if (right && ln.bbox[2] - ln.bbox[0] > pw * 0.45) { fullLines++; if (Math.abs(ln.bbox[2] - right) < 3) justifiedLines++ }
+    }
+  }
+  if (pagesRead < 1) throw new Error('This PDF has no text layer to measure. A scan needs OCR first.')
+  const body = Math.round((median(sizes) || 10) * 2) / 2
+  const leading = leads.length ? Math.round(median(leads) * 2) / 2 : Math.round(body * 1.38 * 2) / 2
+  const pageSize = [Math.round(median(widths) * 10) / 10, Math.round(median(heights) * 10) / 10]
+  const margins = {
+    left: Math.round(median(lefts) || pageSize[0] * 0.11),
+    right: Math.round((rights.length ? median(rights) : null) || pageSize[0] * 0.11),
+    top: Math.round(median(tops) || pageSize[1] * 0.08),
+    bottom: Math.round(median(bottoms) || pageSize[1] * 0.09),
+  }
+  const indent = indents.length >= 3 ? Math.round(modeOf(indents, 1)) : 0
+  const justify = fullLines >= 5 && justifiedLines / fullLines > 0.5
+  const pageNumbers = folios >= Math.max(2, pagesRead / 2)
+  const family = realFont ? (monoVotes > serifVotes + sansVotes ? 'mono' : serifVotes >= sansVotes ? 'serif' : 'sans') : null
+  return { pageSize, margins, fontSize: body, leading, indent, justify, pageNumbers, family, pagesRead }
+}
+
+// The document's text layer as plain text with blank lines between paragraphs,
+// ready for makeBook in blank-line mode. A new paragraph starts on an indented
+// line, after a vertical gap, or after a short line that ends a sentence.
+// Hyphenated line ends ("comien-" / "do") are re-joined. Page numbers dropped.
+function extractText () {
+  const d = openPdf()
+  const total = d.countPages()
+  let style = null
+  try { style = pageStyle() } catch (e) {}
+  const body = style ? style.fontSize : 10
+  // Glyph sizes in an OCR layer wobble by 20% from line to line, so only a PDF
+  // with real fonts can have headings detected from size. A scan's chapter
+  // titles are left for the "#" marker or the CAPS/roman-numeral detection.
+  const exactSizes = !!(style && style.family)
+  const paras = []
+  let cur = ''
+  let prev = null
+  // Cover pages and blank leaves OCR into confetti like "==" or "0 YM"; keep a
+  // paragraph only if it is mostly letters.
+  const isText = (t) => {
+    const letters = (t.match(/\p{L}/gu) || []).length
+    const solid = t.replace(/\s+/g, '').length
+    return letters >= 3 && letters / Math.max(1, solid) >= 0.5
+  }
+  const flush = () => { const t = cur.trim(); if (t && isText(t)) paras.push(t); cur = '' }
+  const heads = runningHeads(d, samplePages(total))
+  for (let i = 0; i < total; i++) {
+    const page = d.loadPage(i)
+    const lines = pageLines(page).filter((ln) => !isFurniture(ln, heads))
+    try { page.destroy() } catch (e) {}
+    const left = lines.length ? modeOf(lines.map((ln) => ln.bbox[0]), 2) : 0
+    const right = lines.length ? Math.max(...lines.map((ln) => ln.bbox[2])) : 0
+    let first = true
+    for (const ln of lines) {
+      const text = ln.text.replace(/\s+/g, ' ').trim()
+      if (!text) continue
+      const heading = exactSizes && ln.size >= body * 1.25 && text.length < 80
+      const indented = ln.bbox[0] - left > body * 0.4
+      const gap = prev && !first && (ln.y - prev.y) > body * 2.2
+      const prevEnded = prev && /[.!?…»”"]$/.test(prev.text.trim())
+      const prevShort = prevEnded && prev.bbox[2] < right - body * 3
+      // A dash-led line after a finished sentence is a new speaker, even when
+      // the OCR lost its indent.
+      const dialogue = prevEnded && /^[-–—]/.test(text)
+      if (heading) { flush(); if (isText(text)) paras.push('# ' + text); prev = ln; first = false; continue }
+      if (indented || gap || prevShort || dialogue || (prev && prev.heading)) flush()
+      if (cur && /[A-Za-zÀ-ÿ]-$/.test(cur) && /^[a-zà-ÿ]/.test(text)) cur = cur.slice(0, -1) + text
+      else cur = cur ? cur + ' ' + text : text
+      prev = { ...ln, heading: false }
+      first = false
+    }
+    // a page break inside a paragraph is not a paragraph break: keep `cur` open
+  }
+  flush()
+  return { text: paras.join('\n\n'), paragraphs: paras.length, style }
 }
 
 // ---------------------------------------------------------------- safety scan
@@ -766,6 +1334,9 @@ const handlers = {
   textLines,
   replaceLine,
   cleanScan,
+  makeBook,
+  pageStyle,
+  extractText,
   download: () => ({ bytes: new Uint8Array(bytes) }),
   undo,
 }

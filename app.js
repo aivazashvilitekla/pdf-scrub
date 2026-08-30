@@ -8,7 +8,7 @@ const $ = (id) => document.getElementById(id)
 
 // Version query in step with index.html: without it a stale worker.js can be
 // served from cache against a fresh app.js.
-const worker = new Worker('worker.js?v=4', { type: 'module' })
+const worker = new Worker('worker.js?v=7', { type: 'module' })
 const pending = new Map()
 let seq = 0
 
@@ -459,7 +459,7 @@ async function openEditor (i) {
 $('ed-close').addEventListener('click', () => { $('editor').hidden = true })
 $('editor').addEventListener('click', (e) => { if (e.target === $('editor')) $('editor').hidden = true })
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { $('editor').hidden = true; $('viewer').hidden = true; return }
+  if (e.key === 'Escape') { $('editor').hidden = true; $('viewer').hidden = true; $('book').hidden = true; return }
   if ($('viewer').hidden) return
   if (e.key === 'ArrowLeft') { e.preventDefault(); vwStep(-1) }
   if (e.key === 'ArrowRight') { e.preventDefault(); vwStep(1) }
@@ -616,6 +616,125 @@ $('do-move').addEventListener('click', async () => {
   })
   $('editor').hidden = true
   toast(`Moved to page ${ED.dst + 1}.`)
+})
+
+
+// ------------------------------------------------------------------ book maker
+
+// A layout measured from the open PDF by pageStyle(); null means the presets.
+let bookLayout = null
+
+function openBook () {
+  const hasDoc = !$('work').hidden && S.pages.length > 0
+  $('book-from-text').disabled = !hasDoc
+  $('book-from-style').disabled = !hasDoc
+  $('book').hidden = false
+  bookStat()
+  $('book-text').focus()
+}
+
+function describeStyle (st) {
+  const mm = (pt) => Math.round(pt / 72 * 25.4)
+  return `${mm(st.pageSize[0])} × ${mm(st.pageSize[1])} mm page, ${st.fontSize} pt on ${st.leading} pt, ` +
+    `margins ${st.margins.left}/${st.margins.right}/${st.margins.top}/${st.margins.bottom} pt` +
+    (st.indent ? `, indent ${st.indent} pt` : '') + (st.justify ? ', justified' : '') +
+    (st.family ? `, ${st.family}` : '') + ` (from ${st.pagesRead} pages)`
+}
+
+function applyStyle (st) {
+  bookLayout = { pageSize: st.pageSize, margins: st.margins, leading: st.leading, indent: st.indent }
+  const sizeSel = $('book-size')
+  if (!sizeSel.querySelector('option[value="matched"]')) {
+    const o = document.createElement('option')
+    o.value = 'matched'
+    o.textContent = 'Same as the open PDF'
+    sizeSel.insertBefore(o, sizeSel.firstChild)
+  }
+  sizeSel.value = 'matched'
+  const fs = $('book-fontsize')
+  if (![...fs.options].some((o) => Number(o.value) === st.fontSize)) {
+    const o = document.createElement('option')
+    o.value = String(st.fontSize)
+    o.textContent = `${st.fontSize} pt`
+    fs.appendChild(o)
+  }
+  fs.value = String(st.fontSize)
+  $('book-justify').checked = st.justify
+  $('book-numbers').checked = st.pageNumbers
+  if (st.family) $('book-font').value = st.family === 'mono' ? 'serif' : st.family
+  $('book-style-out').textContent = 'Matched: ' + describeStyle(st)
+  $('book-style-out').className = 'result good'
+}
+
+// Choosing a preset size again drops the matched layout.
+$('book-size').addEventListener('change', (e) => {
+  if (e.target.value !== 'matched') { bookLayout = null; $('book-style-out').textContent = '' }
+})
+
+$('book-from-style').addEventListener('click', async () => {
+  try {
+    const st = await busy('Measuring the layout\u2026', () => call('pageStyle'))
+    applyStyle(st)
+  } catch (err) { toast(err.message, true) }
+})
+
+$('book-from-text').addEventListener('click', async () => {
+  const box = $('book-text')
+  if (box.value.trim() && !confirm('Replace the text in the box with the open PDF\u2019s text?')) return
+  try {
+    const res = await busy('Reading the text layer\u2026', () => call('extractText'))
+    if (!res.text.trim()) return toast('This PDF has no text layer. A scan needs OCR first.', true)
+    box.value = res.text
+    $('book-paras').value = 'blank'
+    bookStat()
+    if (res.style) applyStyle(res.style)
+    toast(`${res.paragraphs} paragraphs read from the PDF.`)
+  } catch (err) { toast(err.message, true) }
+})
+
+function bookStat () {
+  const t = $('book-text').value
+  const words = t.split(/\s+/).filter(Boolean).length
+  $('book-stat').textContent = words ? `${words.toLocaleString()} words` : ''
+}
+
+$('book-open').addEventListener('click', openBook)
+$('book-open-hero').addEventListener('click', openBook)
+$('book-close').addEventListener('click', () => { $('book').hidden = true })
+$('book').addEventListener('click', (e) => { if (e.target === $('book')) $('book').hidden = true })
+$('book-text').addEventListener('input', bookStat)
+
+$('book-make').addEventListener('click', async () => {
+  const text = $('book-text').value
+  if (!text.trim()) return toast('Paste some text first.', true)
+  // Creating a book replaces the working document and clears Undo, so an open
+  // file with edits that were never downloaded needs a word of warning.
+  if (!$('work').hidden && S.pages.length && !$('undo').disabled &&
+      !confirm('The open PDF has edits you have not downloaded. Replace it with the new book?')) return
+  const title = $('book-title').value.trim()
+  try {
+    const res = await busy('Laying out the book\u2026', () => call('makeBook', {
+      text,
+      title,
+      author: $('book-author').value.trim(),
+      subtitle: $('book-subtitle').value.trim(),
+      autoHeadings: $('book-auto').checked,
+      size: $('book-size').value === 'matched' ? 'a4' : $('book-size').value,
+      layout: $('book-size').value === 'matched' ? bookLayout : null,
+      font: $('book-font').value,
+      fontSize: Number($('book-fontsize').value),
+      justify: $('book-justify').checked,
+      pageNumbers: $('book-numbers').checked,
+      paragraphs: $('book-paras').value,
+      unsupported: $('book-replace').checked ? 'replace' : 'reject',
+    }))
+    S.name = (title || 'book').replace(/[\\/:*?"<>|]+/g, ' ').trim() || 'book'
+    adopt(res.meta)
+    $('undo').disabled = true
+    $('book').hidden = true
+    toast(`${res.meta.pageCount} page${res.meta.pageCount === 1 ? '' : 's'} from ${res.words.toLocaleString()} words` +
+      (res.substituted ? `, ${res.substituted} character${res.substituted === 1 ? '' : 's'} substituted` : '') + '.')
+  } catch (err) { toast(err.message, true) }
 })
 
 

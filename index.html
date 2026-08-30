@@ -8,7 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="google" content="notranslate">
 <title>PDF Scrub</title>
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=7">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧼</text></svg>">
 </head>
 <body>
@@ -17,6 +17,7 @@
   <div class="brand"><span class="dot"></span>PDF&nbsp;Scrub</div>
   <div class="bar-actions">
     <label class="btn" for="file-in">Open PDF</label>
+    <button class="btn" id="book-open">New from text</button>
     <input id="file-in" type="file" accept="application/pdf" hidden>
     <label class="btn ghost" for="file-add" id="add-label" hidden>Merge in…</label>
     <input id="file-add" type="file" accept="application/pdf" multiple hidden>
@@ -34,8 +35,12 @@
     <h1>Drop a PDF here</h1>
     <p>Strip a repeated watermark line, whiten the gray background of a scan so it
        prints without wasting ink, move part of a page somewhere else, reorder or
-       delete pages, and check the file for active content.</p>
-    <label class="btn primary" for="file-in">Choose a PDF</label>
+       delete pages, check the file for active content, or turn pasted text into a
+       printable book.</p>
+    <div class="row center">
+      <label class="btn primary" for="file-in">Choose a PDF</label>
+      <button class="btn" id="book-open-hero">Or paste text to make a book</button>
+    </div>
     <p class="fineprint">Nothing is uploaded. The file never leaves this browser.</p>
   </div>
 </section>
@@ -203,6 +208,76 @@
   </div>
 </div>
 
+<!-- ---------------------------------------------------------------- book maker -->
+<div id="book" class="overlay" hidden>
+  <div class="book-box">
+    <header class="editor-head">
+      <h3>Make a book from text</h3>
+      <div class="row tight">
+        <span class="muted" id="book-stat"></span>
+        <button class="btn small ghost" id="book-close">Close</button>
+      </div>
+    </header>
+    <div class="book-body">
+      <p class="hint">
+        Paste the whole text. A line starting with <code># </code> becomes a chapter title on a
+        fresh page, <code>## </code> a subheading, and <code>***</code> on its own line a
+        scene break. With <i>detect chapter titles</i> on, a line in CAPITALS, a roman
+        numeral alone or <i>Part One</i> counts as a chapter too. Western European text
+        only: the built-in fonts have no Cyrillic or Greek.
+      </p>
+      <div class="row">
+        <span class="muted">From the open PDF:</span>
+        <button class="btn small" id="book-from-text" disabled title="Pull the open PDF's text layer into the box, one paragraph per block">Use its text</button>
+        <button class="btn small" id="book-from-style" disabled title="Measure the open PDF's page size, margins, text size, leading and indent, and lay the new book out the same way">Match its layout</button>
+        <span class="result" id="book-style-out"></span>
+      </div>
+      <textarea id="book-text" rows="14" spellcheck="false" translate="no" placeholder="# Capítulo 1&#10;&#10;He pasado un puente estupendo. He estado con unos amigos en un pueblecito de la Sierra..."></textarea>
+      <div class="book-opts">
+        <label class="field">Title <input type="text" id="book-title" placeholder="optional, makes a title page"></label>
+        <label class="field">Author <input type="text" id="book-author" placeholder="optional"></label>
+        <label class="field">Subtitle <input type="text" id="book-subtitle" placeholder="optional, e.g. translated by…"></label>
+        <label class="field">Paper
+          <select id="book-size">
+            <option value="a4" selected>A4</option>
+            <option value="a5">A5</option>
+            <option value="letter">Letter</option>
+          </select>
+        </label>
+        <label class="field">Font
+          <select id="book-font">
+            <option value="serif" selected>Serif (Times)</option>
+            <option value="sans">Sans (Helvetica)</option>
+          </select>
+        </label>
+        <label class="field">Size
+          <select id="book-fontsize">
+            <option value="10">10 pt</option>
+            <option value="11" selected>11 pt</option>
+            <option value="12">12 pt</option>
+            <option value="13">13 pt</option>
+            <option value="14">14 pt</option>
+            <option value="16">16 pt</option>
+          </select>
+        </label>
+        <label class="field">Paragraphs
+          <select id="book-paras">
+            <option value="lines" selected>one per line</option>
+            <option value="blank">separated by blank lines</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="book-justify" checked> justify</label>
+        <label class="check"><input type="checkbox" id="book-numbers" checked> page numbers</label>
+        <label class="check" title="A line in CAPITALS, a roman numeral on its own, or 'Part One' / 'Chapter 3' becomes a chapter title"><input type="checkbox" id="book-auto" checked> detect chapter titles</label>
+        <label class="check"><input type="checkbox" id="book-replace"> replace unsupported characters with ?</label>
+        <button class="btn primary" id="book-make">Create PDF</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden></div>
 <div id="busy" class="busy" hidden><div class="spinner"></div><span id="busy-text">Working…</span></div>
 
@@ -213,6 +288,6 @@
   <a href="SOURCE.md">Source</a>.
 </footer>
 
-<script type="module" src="app.js?v=4"></script>
+<script type="module" src="app.js?v=7"></script>
 </body>
 </html>
